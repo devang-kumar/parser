@@ -96,18 +96,34 @@ export async function syncToGoogleSheetsWebhook(
 }
 
 /**
- * Google Apps Script Setup Code Snippet to display to the user
+ * Thread-Safe Multi-User Google Apps Script Setup Code Template
+ * Uses LockService to guarantee that multiple users syncing simultaneously
+ * will never overwrite each other or scramble row order.
  */
-export const APPS_SCRIPT_CODE_TEMPLATE = `// Copy and paste this code into Google Sheets -> Extensions -> Apps Script
+export const APPS_SCRIPT_CODE_TEMPLATE = `// Copy and paste into Google Sheets -> Extensions -> Apps Script
 function doPost(e) {
+  // 1. Acquire Script Lock to prevent multi-user race conditions & row overwrites
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000); // Wait up to 30s for lock
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", error: "Sheet locked by another user. Try again." }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
   try {
     var data = JSON.parse(e.postData.contents);
     var ss = data.spreadsheetId ? SpreadsheetApp.openById(data.spreadsheetId) : SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = data.tabName ? ss.getSheetByName(data.tabName) : ss.getSheets()[0];
+    var sheetName = data.tabName || "Sheet1";
+    var sheet = ss.getSheetByName(sheetName);
     
     if (!sheet) {
-      sheet = ss.insertSheet(data.tabName || "Imported Statements");
-      // Add Headers if new sheet
+      sheet = ss.insertSheet(sheetName);
+      sheet.appendRow(["Date", "Price Paid", "Charge Information"]);
+    }
+
+    // Auto-create headers if sheet is empty
+    if (sheet.getLastRow() === 0) {
       sheet.appendRow(["Date", "Price Paid", "Charge Information"]);
     }
     
@@ -121,5 +137,7 @@ function doPost(e) {
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({ status: "error", error: err.toString() }))
       .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock(); // Always release lock for next user request
   }
 }`;
