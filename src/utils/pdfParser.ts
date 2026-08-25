@@ -278,7 +278,7 @@ async function parseCSVStatement(
     Papa.parse(text, {
       header: true,
       skipEmptyLines: true,
-      complete: (results) => {
+      complete: (results: Papa.ParseResult<any>) => {
         const rows: TransactionRow[] = [];
         let lineCounter = 1;
 
