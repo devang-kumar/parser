@@ -468,7 +468,7 @@ export function App() {
         </div>
 
         {/* Admin Panel Overlay / Modal (Visible when triggered by Admin) */}
-        {isAdminPanelOpen && currentUser.role === 'admin' && (
+        {isAdminPanelOpen && currentUser && currentUser.role === 'admin' && (
           <AdminPanel
             currentUser={currentUser}
             onClose={() => setIsAdminPanelOpen(false)}
