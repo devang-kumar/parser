@@ -1,3 +1,5 @@
+export * from './auth';
+
 export type GroupType = 'Group A' | 'Group B' | string;
 
 export interface SavedSpreadsheet {

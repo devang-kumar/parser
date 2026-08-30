@@ -4,7 +4,17 @@ import { StatementUploader } from './components/StatementUploader';
 import { TransactionValidator } from './components/TransactionValidator';
 import { SavedSheetsManager } from './components/SavedSheetsManager';
 import { SetupGuideModal } from './components/SetupGuideModal';
-import type { StatementFile, SavedSpreadsheet, TransactionRow, GroupType, ExtractionStats } from './types';
+import { AuthModal } from './components/AuthModal';
+import { AdminPanel } from './components/AdminPanel';
+import { authService } from './services/authService';
+import type { 
+  StatementFile, 
+  SavedSpreadsheet, 
+  TransactionRow, 
+  GroupType, 
+  ExtractionStats,
+  User
+} from './types';
 import { parseStatementFile } from './utils/pdfParser';
 import { Sparkles, FileCheck } from 'lucide-react';
 
@@ -34,6 +44,16 @@ const INITIAL_DEFAULT_SHEETS: SavedSpreadsheet[] = [
 ];
 
 export function App() {
+  // Auth state
+  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+    const session = authService.getCurrentSession();
+    return session ? session.user : null;
+  });
+
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+
+  // App core state
   const [files, setFiles] = useState<StatementFile[]>([]);
   const [transactions, setTransactions] = useState<TransactionRow[]>([]);
   const [savedSheets, setSavedSheets] = useState<SavedSpreadsheet[]>(() => {
@@ -49,6 +69,19 @@ export function App() {
     localStorage.setItem(LOCAL_STORAGE_SHEETS_KEY, JSON.stringify(savedSheets));
   }, [savedSheets]);
 
+  // Handle logout
+  const handleLogout = () => {
+    authService.logout();
+    setCurrentUser(null);
+    setIsAdminPanelOpen(false);
+  };
+
+  // Handle successful authentication
+  const handleAuthSuccess = (user: User) => {
+    setCurrentUser(user);
+    setShowAuthModal(false);
+  };
+
   // Compute live statistics
   const stats: ExtractionStats = {
     totalFiles: files.length,
@@ -58,8 +91,13 @@ export function App() {
     totalAmount: transactions.reduce((sum, t) => sum + t.pricePaid, 0),
   };
 
-  // Upload handler
+  // Upload handler with activity logging
   const handleUploadFiles = (rawFiles: File[], group: GroupType) => {
+    if (!currentUser) {
+      setShowAuthModal(true);
+      return;
+    }
+
     const newStatementFiles: StatementFile[] = rawFiles.map((file, idx) => ({
       id: `file-${Date.now()}-${idx}`,
       name: file.name,
@@ -74,9 +112,15 @@ export function App() {
     }));
 
     setFiles((prev) => [...prev, ...newStatementFiles]);
+
+    authService.logActivity(
+      'STATEMENT_UPLOADED',
+      `Queued ${rawFiles.length} file(s) for ${group}. (${rawFiles.map((f) => f.name).join(', ')})`,
+      'FILE_UPLOAD'
+    );
   };
 
-  // Process queued files
+  // Process queued files with activity logging
   const handleProcessFiles = async () => {
     setIsProcessing(true);
     const updatedFiles = [...files];
@@ -99,9 +143,21 @@ export function App() {
           fileItem.transactions = parsedRows;
 
           setTransactions((prev) => [...prev, ...parsedRows]);
+
+          authService.logActivity(
+            'PARSE_STATEMENT_SUCCESS',
+            `Successfully parsed ${parsedRows.length} transactions from ${fileItem.name} (${fileItem.group})`,
+            'PARSE_DATA'
+          );
         } catch (err: any) {
           fileItem.status = 'error';
           fileItem.errorMessage = err.message || 'Failed to parse statement file';
+
+          authService.logActivity(
+            'PARSE_STATEMENT_FAILED',
+            `Failed to parse ${fileItem.name}: ${err.message}`,
+            'PARSE_DATA'
+          );
         }
 
         setFiles([...updatedFiles]);
@@ -113,8 +169,17 @@ export function App() {
 
   // Remove file from queue
   const handleRemoveFile = (fileId: string) => {
+    const targetFile = files.find((f) => f.id === fileId);
     setFiles((prev) => prev.filter((f) => f.id !== fileId));
     setTransactions((prev) => prev.filter((t) => t.fileId !== fileId));
+
+    if (targetFile) {
+      authService.logActivity(
+        'FILE_REMOVED',
+        `Removed statement file ${targetFile.name} from queue.`,
+        'FILE_UPLOAD'
+      );
+    }
   };
 
   // Update specific transaction row
@@ -126,11 +191,25 @@ export function App() {
 
   // Delete transaction row
   const handleDeleteTransaction = (id: string) => {
+    const target = transactions.find((t) => t.id === id);
     setTransactions((prev) => prev.filter((t) => t.id !== id));
+
+    if (target) {
+      authService.logActivity(
+        'TRANSACTION_DELETED',
+        `Deleted transaction row (${target.date} - ${target.chargeInformation} - ${target.pricePaidFormatted})`,
+        'PARSE_DATA'
+      );
+    }
   };
 
   // Clear all parsed data
   const handleClearAll = () => {
+    authService.logActivity(
+      'CLEAR_ALL_DATA',
+      `Cleared ${transactions.length} transaction rows and ${files.length} statement files.`,
+      'PARSE_DATA'
+    );
     setTransactions([]);
     setFiles([]);
   };
@@ -138,10 +217,23 @@ export function App() {
   // Sheets Manager handlers
   const handleAddSheet = (sheet: SavedSpreadsheet) => {
     setSavedSheets((prev) => [sheet, ...prev]);
+    authService.logActivity(
+      'SHEET_MAPPING_ADDED',
+      `Added Google Sheet mapping: "${sheet.title}" (${sheet.groupId})`,
+      'SHEET_SYNC'
+    );
   };
 
   const handleDeleteSheet = (id: string) => {
+    const target = savedSheets.find((s) => s.id === id);
     setSavedSheets((prev) => prev.filter((s) => s.id !== id));
+    if (target) {
+      authService.logActivity(
+        'SHEET_MAPPING_DELETED',
+        `Deleted sheet mapping: "${target.title}"`,
+        'SHEET_SYNC'
+      );
+    }
   };
 
   const handleSetDefaultSheet = (id: string) => {
@@ -158,6 +250,10 @@ export function App() {
 
   // Load Real Chase & Business Statement Demo Data for testing
   const handleLoadDemoData = () => {
+    if (!currentUser) {
+      setShowAuthModal(true);
+      return;
+    }
     const rawChaseLines = [
       { date: '06/26/2026', desc: 'TEMU.COM 1-302-4806118 MA', price: -32.76, type: 'CREDIT' },
       { date: '07/12/2026', desc: 'ANNUAL HOTEL CREDIT', price: -50.00, type: 'CREDIT' },
@@ -313,21 +409,33 @@ export function App() {
         transactions: sampleRowsGroupB,
       },
     ]);
+
+    authService.logActivity(
+      'DEMO_DATA_LOADED',
+      'Loaded 43 sample transactions (Group A & Group B).',
+      'PARSE_DATA'
+    );
   };
+
+  // (Removed early return for !currentUser)
 
   return (
     <div className="min-h-screen pb-16 space-y-6 bg-slate-50">
       {/* Top Navbar */}
       <Navbar
         stats={stats}
+        currentUser={currentUser}
         onOpenGuide={() => setIsGuideOpen(true)}
         onOpenSheetsManager={() => setIsSheetsManagerOpen(true)}
+        onOpenAdminPanel={() => setIsAdminPanelOpen(true)}
+        onLogout={handleLogout}
+        onOpenAuth={() => setShowAuthModal(true)}
       />
 
       <main className="max-w-7xl mx-auto px-4 lg:px-8 space-y-6">
         
-        {/* Simplified Clean Banner Section */}
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs relative overflow-hidden">
+        {/* Banner Section */}
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs relative overflow-hidden">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
@@ -358,6 +466,14 @@ export function App() {
             )}
           </div>
         </div>
+
+        {/* Admin Panel Overlay / Modal (Visible when triggered by Admin) */}
+        {isAdminPanelOpen && currentUser.role === 'admin' && (
+          <AdminPanel
+            currentUser={currentUser}
+            onClose={() => setIsAdminPanelOpen(false)}
+          />
+        )}
 
         {/* Saved Sheets Manager Drawer / Modal section if toggled */}
         {isSheetsManagerOpen && (
@@ -392,6 +508,14 @@ export function App() {
 
       {/* Setup Guide Modal */}
       <SetupGuideModal isOpen={isGuideOpen} onClose={() => setIsGuideOpen(false)} />
+
+      {/* Auth Modal Overlay */}
+      {showAuthModal && (
+        <AuthModal 
+          onSuccess={handleAuthSuccess} 
+          onClose={() => setShowAuthModal(false)} 
+        />
+      )}
     </div>
   );
 }
