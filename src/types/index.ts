@@ -1,6 +1,13 @@
 export * from './auth';
 
-export type GroupType = 'Group A' | 'Group B' | string;
+export type GroupType = 'default' | 'all';
+
+export interface AuthResponse {
+  success: boolean;
+  message?: string;
+  token?: string;
+  user?: any;
+}
 
 export interface SavedSpreadsheet {
   id: string;
@@ -8,10 +15,8 @@ export interface SavedSpreadsheet {
   url: string;
   spreadsheetId: string;
   tabName: string;
-  groupId: GroupType;
   webhookUrl?: string;
   createdAt: string;
-  isDefault?: boolean;
 }
 
 export type TransactionType = 'PURCHASE' | 'CREDIT' | 'PAYMENT' | 'FEE' | 'INTEREST' | 'OTHER';
@@ -28,7 +33,7 @@ export interface TransactionRow {
   type: TransactionType;
   rawLine: string;
   confidenceScore: number;
-  group: GroupType;
+  group?: GroupType;
   isDuplicate?: boolean;
   isSelected?: boolean;
 }
@@ -40,17 +45,17 @@ export interface StatementFile {
   uploadTime: string;
   status: 'queued' | 'processing' | 'completed' | 'error';
   progress: number;
-  group: GroupType;
   transactionCount: number;
   transactions: TransactionRow[];
   errorMessage?: string;
   fileObject?: File;
 }
 
-export interface ExtractionStats {
-  totalFiles: number;
-  totalTransactions: number;
-  groupATransactions: number;
-  groupBTransactions: number;
-  totalAmount: number;
+export interface UploadHistoryItem {
+  id: string;
+  userId: string;
+  fileName: string;
+  uploadDate: string;
+  transactionCount: number;
+  transactions: TransactionRow[];
 }

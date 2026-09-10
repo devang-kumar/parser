@@ -50,8 +50,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose }) 
   // Notification message toast
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const refreshData = () => {
-    setUsers(authService.getUsers());
+  const refreshData = async () => {
+    setUsers(await authService.getUsers());
     setLogs(authService.getLogs());
   };
 
@@ -65,9 +65,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose }) 
   };
 
   // Delete User Handler
-  const handleConfirmDelete = () => {
+  const handleConfirmDelete = async () => {
     if (!userToDelete) return;
-    const res = authService.removeUser(userToDelete.id);
+    const res = await authService.removeUser(userToDelete.id);
     if (res.success) {
       showToast('success', res.message);
       refreshData();
@@ -78,8 +78,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose }) 
   };
 
   // Toggle User Block Status
-  const handleToggleStatus = (targetUser: User) => {
-    const res = authService.toggleUserStatus(targetUser.id);
+  const handleToggleStatus = async (targetUser: User) => {
+    const res = await authService.toggleUserStatus(targetUser.id);
     if (res.success) {
       showToast('success', res.message);
       refreshData();
@@ -89,9 +89,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose }) 
   };
 
   // Toggle User Role
-  const handleToggleRole = (targetUser: User) => {
+  const handleToggleRole = async (targetUser: User) => {
     const nextRole: UserRole = targetUser.role === 'admin' ? 'user' : 'admin';
-    const res = authService.updateUserRole(targetUser.id, nextRole);
+    const res = await authService.updateUserRole(targetUser.id, nextRole);
     if (res.success) {
       showToast('success', res.message);
       refreshData();
@@ -101,11 +101,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onClose }) 
   };
 
   // Add User Submit
-  const handleAddUserSubmit = (e: React.FormEvent) => {
+  const handleAddUserSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
 
-    const res = authService.addUser({
+    const res = await authService.addUser({
       name: newUserName,
       email: newUserEmail,
       password: newUserPassword,
