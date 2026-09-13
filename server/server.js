@@ -34,7 +34,7 @@ app.use('/api/chat', chatRoutes);
 // Serve static frontend in production
 const distPath = path.resolve(__dirname, '../dist');
 app.use(express.static(distPath));
-app.get('*', (req, res) => {
+app.get('/{0,}', (req, res) => {
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
