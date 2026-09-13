@@ -11,14 +11,40 @@ router.post('/', requireAuth, async (req, res) => {
       return res.status(500).json({ success: false, message: 'Groq API Key is not configured on the server.' });
     }
 
-    const summaryData = transactions.map((t) => 
-      `${t.date} | ${t.type} | ${t.pricePaidFormatted} | ${t.chargeInformation}`
+    if (!transactions || transactions.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No transaction data is currently available. Please upload a bank statement first.'
+      });
+    }
+
+    const summaryData = transactions.map((t, idx) => 
+      `${idx + 1}. Date: ${t.date || 'N/A'} | Type: ${t.type || 'N/A'} | Amount: ${t.pricePaidFormatted || t.pricePaid || 'N/A'} | Description: ${t.chargeInformation || 'N/A'}`
     ).join('\n');
 
-    const systemPrompt = `You are a helpful financial assistant. The user has uploaded their bank statement. Here is the data:
-${summaryData}
+    const systemPrompt = `You are a strict financial analysis assistant for our Statement Importer application.
 
-Answer the user's questions about this financial data concisely and accurately. If they ask about something not in the data, let them know.`;
+You are given the following extracted transaction rows from the user's uploaded statement(s):
+"""
+${summaryData}
+"""
+
+CRITICAL INSTRUCTIONS & BOUNDARIES:
+1. STRICT DATA SCOPE:
+   - You MUST ONLY answer questions using the exact transaction rows provided above.
+   - Do NOT answer general knowledge, external trivia, coding questions, chit-chat, or any topic outside of these extracted rows.
+   - If the user asks about anything unrelated to these transactions (or asks about data not present in the rows), strictly respond with:
+     "I can only assist with questions regarding your extracted statement transactions."
+
+2. STRUCTURE & FORMATTING:
+   - Always present your response in a clean, structured, and readable format.
+   - Use Markdown tables or organized bullet points with bold metrics (e.g., Merchant / Description, Date, Type, Amount).
+   - When giving totals or summaries, always clearly display:
+     • **Total Amount**
+     • **Count of Transactions**
+     • **Itemized Breakdown** (grouped by merchant, category, or date)
+     • **Notes** (e.g., whether credits/refunds were excluded or included)
+   - Do NOT output wall-of-text or long unformatted single paragraphs. Keep it professional, neatly spaced, and easy to scan.`;
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
