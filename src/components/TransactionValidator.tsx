@@ -20,6 +20,7 @@ import {
   downloadCSV,
   syncToGoogleSheetsWebhook,
 } from '../utils/sheetsSync';
+import { createAndSyncNewSheet, syncToExistingSheet } from '../utils/googleAuth';
 
 interface TransactionValidatorProps {
   transactions: TransactionRow[];
@@ -89,42 +90,65 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
     downloadCSV(filtered, `Bank_Statements`);
   };
 
-  const handleSyncToSheets = async () => {
+  const [lastSheetUrl, setLastSheetUrl] = useState<string | null>(null);
+
+  const handle1ClickGoogleSync = async () => {
     if (filtered.length === 0) return;
 
-    const targetSheet = savedSheets[0]; // Assuming only one config now
+    setSyncStatus({ loading: true, message: 'Exporting to Google Sheets with 1-Click...' });
+    setLastSheetUrl(null);
 
-    if (!targetSheet) {
-      setSyncStatus({
-        loading: false,
-        message: 'No Google Sheet configured! Please configure one in Sheets Configuration.',
-        isError: true,
-      });
-      return;
+    const targetSheet = savedSheets[0];
+    const hasValidTargetSheet =
+      targetSheet &&
+      ((targetSheet.url && targetSheet.url.includes('/d/')) ||
+        (targetSheet.spreadsheetId && targetSheet.spreadsheetId.length > 15 && !targetSheet.spreadsheetId.startsWith('config-')));
+
+    // If user configured a valid target sheet, append to it
+    let res;
+    if (hasValidTargetSheet) {
+      res = await syncToExistingSheet(
+        targetSheet.url || targetSheet.spreadsheetId,
+        targetSheet.tabName || 'Sheet1',
+        filtered
+      );
+    } else {
+      // Create a brand new Google Sheet directly in their Google Drive
+      res = await createAndSyncNewSheet(
+        `Statement Import (${filtered.length} rows) - ${new Date().toLocaleDateString()}`,
+        filtered
+      );
     }
 
-    if (!targetSheet.webhookUrl) {
+    if (res.success) {
+      if (res.spreadsheetUrl) setLastSheetUrl(res.spreadsheetUrl);
       setSyncStatus({
         loading: false,
-        message: `Sheet configuration has no Webhook URL. Add an Apps Script webhook URL in Sheets Configuration.`,
-        isError: true,
+        message: res.message,
+        isError: false,
       });
-      return;
+    } else {
+      // Fallback: If webhook is configured, try webhook as well
+      if (targetSheet?.webhookUrl) {
+        const webhookRes = await syncToGoogleSheetsWebhook(
+          targetSheet.webhookUrl,
+          targetSheet.spreadsheetId,
+          targetSheet.tabName,
+          filtered
+        );
+        setSyncStatus({
+          loading: false,
+          message: webhookRes.message,
+          isError: !webhookRes.success,
+        });
+      } else {
+        setSyncStatus({
+          loading: false,
+          message: res.message,
+          isError: true,
+        });
+      }
     }
-
-    setSyncStatus({ loading: true, message: 'Syncing rows to Google Sheets...' });
-    const res = await syncToGoogleSheetsWebhook(
-      targetSheet.webhookUrl,
-      targetSheet.spreadsheetId,
-      targetSheet.tabName,
-      filtered
-    );
-
-    setSyncStatus({
-      loading: false,
-      message: res.message,
-      isError: !res.success,
-    });
   };
 
   return (
@@ -199,15 +223,15 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
             )}
           </button>
 
-          {/* Sync via Webhook */}
+          {/* 1-Click Sync to Google Sheets via Google OAuth */}
           <button
-            onClick={handleSyncToSheets}
+            onClick={handle1ClickGoogleSync}
             disabled={filtered.length === 0 || syncStatus.loading}
-            className="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-xs transition-all disabled:opacity-50 cursor-pointer"
-            title="Syncs rows to your linked Google Sheet"
+            className="flex items-center gap-2 px-4 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-lg text-xs font-bold shadow-xs transition-all disabled:opacity-50 cursor-pointer"
+            title="1-Click export directly to Google Sheets using Google account"
           >
             <Send className="h-3.5 w-3.5" />
-            Sync to Google Sheets
+            {syncStatus.loading ? 'Syncing...' : 'Sync to Google Sheets'}
           </button>
 
           {/* Export CSV */}
@@ -237,7 +261,7 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
       {/* Sync Status Banner */}
       {syncStatus.message && (
         <div
-          className={`p-3 rounded-xl text-xs flex items-center justify-between border ${
+          className={`p-3 rounded-xl text-xs flex flex-wrap items-center justify-between gap-2 border ${
             syncStatus.isError
               ? 'bg-red-50 text-red-700 border-red-200'
               : 'bg-emerald-50 text-emerald-700 border-emerald-200'
@@ -251,12 +275,25 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
             )}
             <span className="font-medium">{syncStatus.message}</span>
           </div>
-          <button
-            onClick={() => setSyncStatus({ loading: false })}
-            className="text-slate-500 hover:text-slate-800 text-[10px] cursor-pointer"
-          >
-            Dismiss
-          </button>
+
+          <div className="flex items-center gap-3">
+            {lastSheetUrl && (
+              <a
+                href={lastSheetUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 font-bold text-emerald-800 underline hover:text-emerald-950"
+              >
+                Open in Google Sheets ↗
+              </a>
+            )}
+            <button
+              onClick={() => setSyncStatus({ loading: false })}
+              className="text-slate-500 hover:text-slate-800 text-[10px] cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
 
