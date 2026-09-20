@@ -85,115 +85,102 @@ export async function getValidAccessToken(): Promise<string> {
   return requestGoogleAccessToken();
 }
 
+const PERSISTENT_SHEET_ID_KEY = 'statement_importer_primary_sheet_id';
+
 /**
- * 1-Click: Create a brand new Google Sheet in the user's Google Drive and append transactions
+ * Sync transactions to a single Master Google Sheet with an "Imported At" timestamp separator.
+ * Reuses the existing Google Sheet across multiple imports instead of creating a new one each time.
  */
-export async function createAndSyncNewSheet(
-  title: string,
-  transactions: TransactionRow[]
+export async function syncToMasterSheet(
+  transactions: TransactionRow[],
+  targetSpreadsheetIdOrUrl?: string,
+  tabName: string = 'Transactions'
 ): Promise<{ success: boolean; spreadsheetUrl?: string; message: string; rowsAdded?: number }> {
   try {
     const token = await getValidAccessToken();
 
-    // 1. Create Spreadsheet
-    const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        properties: {
-          title: title || `Statement Import - ${new Date().toLocaleDateString()}`,
-        },
-        sheets: [
-          {
-            properties: {
-              title: 'Transactions',
-            },
-          },
-        ],
-      }),
-    });
+    // 1. Determine spreadsheet ID:
+    // Priority 1: User explicitly provided URL/ID
+    // Priority 2: Stored Master Sheet ID from previous sync
+    let spreadsheetId: string | null = null;
 
-    if (!createRes.ok) {
-      const err = await createRes.json();
-      console.error('Google Sheets create error:', err);
-      const detail = err?.error?.message || JSON.stringify(err);
-      throw new Error(`Google Sheets creation failed: ${detail}`);
+    if (targetSpreadsheetIdOrUrl && targetSpreadsheetIdOrUrl.trim()) {
+      const match = targetSpreadsheetIdOrUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
+      spreadsheetId = match ? match[1] : targetSpreadsheetIdOrUrl.trim();
     }
 
-    const spreadsheet = await createRes.json();
-    const spreadsheetId = spreadsheet.spreadsheetId;
-    const spreadsheetUrl = spreadsheet.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+    if (!spreadsheetId) {
+      spreadsheetId = localStorage.getItem(PERSISTENT_SHEET_ID_KEY);
+    }
 
-    // 2. Format headers & data rows
-    const rows = [
-      ['Date', 'Price Paid', 'Charge Information'],
-      ...transactions.map((t) => [t.date, t.pricePaid, t.chargeInformation]),
-    ];
+    const currentTimestamp = new Date().toLocaleString('en-US', {
+      dateStyle: 'short',
+      timeStyle: 'medium',
+    });
 
-    // 3. Append to created sheet (use encodeURIComponent for sheet title)
-    const appendRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Transactions!A1:append?valueInputOption=USER_ENTERED`,
-      {
+    const sheetTab = tabName || 'Transactions';
+
+    // 2. If no sheet exists yet, create the Master Sheet once
+    if (!spreadsheetId) {
+      const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          range: 'Transactions!A1',
-          majorDimension: 'ROWS',
-          values: rows,
+          properties: {
+            title: 'Bank Statement Imports (Master)',
+          },
+          sheets: [
+            {
+              properties: {
+                title: sheetTab,
+              },
+            },
+          ],
         }),
+      });
+
+      if (!createRes.ok) {
+        const err = await createRes.json();
+        throw new Error(err?.error?.message || 'Failed to create Master Google Sheet');
       }
-    );
 
-    if (!appendRes.ok) {
-      const err = await appendRes.json();
-      console.error('Google Sheets append error:', err);
-      const detail = err?.error?.message || JSON.stringify(err);
-      throw new Error(`Writing data to sheet failed: ${detail}`);
+      const sheetData = await createRes.json();
+      spreadsheetId = sheetData.spreadsheetId;
+
+      if (spreadsheetId) {
+        localStorage.setItem(PERSISTENT_SHEET_ID_KEY, spreadsheetId);
+      }
+
+      // Add Headers to new sheet
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A1:append?valueInputOption=USER_ENTERED`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            range: `${sheetTab}!A1`,
+            majorDimension: 'ROWS',
+            values: [['Date', 'Price Paid', 'Charge Information', 'Imported At']],
+          }),
+        }
+      );
     }
 
-    return {
-      success: true,
-      spreadsheetUrl,
-      rowsAdded: transactions.length,
-      message: `Created new spreadsheet and synced ${transactions.length} rows!`,
-    };
-  } catch (error: any) {
-    console.error('createAndSyncNewSheet error:', error);
-    return {
-      success: false,
-      message: error.message || 'Google OAuth sync failed.',
-    };
-  }
-}
+    // 3. Format rows with the separation field for Timestamp
+    const rows = transactions.map((t) => [
+      t.date,
+      t.pricePaid,
+      t.chargeInformation,
+      currentTimestamp,
+    ]);
 
-/**
- * Sync to an existing Google Spreadsheet by ID or Link
- */
-export async function syncToExistingSheet(
-  spreadsheetIdOrUrl: string,
-  tabName: string,
-  transactions: TransactionRow[]
-): Promise<{ success: boolean; message: string; rowsAdded?: number; spreadsheetUrl?: string }> {
-  try {
-    const token = await getValidAccessToken();
-
-    // Extract ID if full URL passed
-    const match = spreadsheetIdOrUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
-    const spreadsheetId = match ? match[1] : spreadsheetIdOrUrl.trim();
-
-    if (!spreadsheetId) {
-      throw new Error('Please provide a valid Google Sheet URL or ID.');
-    }
-
-    const sheetTab = tabName || 'Sheet1';
-    const rows = transactions.map((t) => [t.date, t.pricePaid, t.chargeInformation]);
-
+    // 4. Append transactions to the persistent master sheet
     const appendRes = await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A1:append?valueInputOption=USER_ENTERED`,
       {
@@ -212,7 +199,11 @@ export async function syncToExistingSheet(
 
     if (!appendRes.ok) {
       const err = await appendRes.json();
-      throw new Error(err?.error?.message || 'Failed to append rows to existing sheet');
+      // If sheet ID was stale or deleted, clear cached ID so next click recreates cleanly
+      if (err?.error?.code === 404) {
+        localStorage.removeItem(PERSISTENT_SHEET_ID_KEY);
+      }
+      throw new Error(err?.error?.message || 'Failed to append rows to master sheet');
     }
 
     const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
@@ -221,12 +212,34 @@ export async function syncToExistingSheet(
       success: true,
       spreadsheetUrl,
       rowsAdded: transactions.length,
-      message: `Successfully added ${transactions.length} rows to sheet!`,
+      message: `Appended ${transactions.length} rows with timestamp (${currentTimestamp}) into your Master Sheet!`,
     };
   } catch (error: any) {
+    console.error('syncToMasterSheet error:', error);
     return {
       success: false,
       message: error.message || 'Failed to sync with Google Sheet.',
     };
   }
+}
+
+/**
+ * Sync to an existing Google Spreadsheet by ID or Link (legacy helper)
+ */
+export async function syncToExistingSheet(
+  spreadsheetIdOrUrl: string,
+  tabName: string,
+  transactions: TransactionRow[]
+): Promise<{ success: boolean; message: string; rowsAdded?: number; spreadsheetUrl?: string }> {
+  return syncToMasterSheet(transactions, spreadsheetIdOrUrl, tabName);
+}
+
+/**
+ * 1-Click: Create or append to master sheet
+ */
+export async function createAndSyncNewSheet(
+  _title: string,
+  transactions: TransactionRow[]
+): Promise<{ success: boolean; spreadsheetUrl?: string; message: string; rowsAdded?: number }> {
+  return syncToMasterSheet(transactions);
 }

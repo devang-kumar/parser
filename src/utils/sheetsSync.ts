@@ -10,13 +10,14 @@ export function extractSpreadsheetId(url: string): string | null {
 
 /**
  * Format transactions into Tab-Separated Values (TSV) for direct paste into Google Sheets
- * Column A: Date | Column B: Price Paid | Column C: Charge Information
+ * Column A: Date | Column B: Price Paid | Column C: Charge Information | Column D: Imported At
  */
 export function formatForGoogleSheetsClipboard(transactions: TransactionRow[]): string {
+  const now = new Date().toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'medium' });
   const rows = transactions.map((t) => {
     // Escape tabs/newlines in description if any
     const cleanDesc = t.chargeInformation.replace(/[\t\r\n]+/g, ' ');
-    return `${t.date}\t${t.pricePaid.toFixed(2)}\t${cleanDesc}`;
+    return `${t.date}\t${t.pricePaid.toFixed(2)}\t${cleanDesc}\t${now}`;
   });
   return rows.join('\n');
 }
@@ -25,11 +26,12 @@ export function formatForGoogleSheetsClipboard(transactions: TransactionRow[]): 
  * Generate CSV string for export
  */
 export function generateCSVContent(transactions: TransactionRow[]): string {
-  const header = 'Date,Price Paid,Charge Information\n';
+  const now = new Date().toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'medium' });
+  const header = 'Date,Price Paid,Charge Information,Imported At\n';
   const body = transactions
     .map((t) => {
       const cleanDesc = `"${t.chargeInformation.replace(/"/g, '""')}"`;
-      return `${t.date},${t.pricePaid.toFixed(2)},${cleanDesc}`;
+      return `${t.date},${t.pricePaid.toFixed(2)},${cleanDesc},"${now}"`;
     })
     .join('\n');
   return header + body;
