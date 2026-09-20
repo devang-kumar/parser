@@ -8,7 +8,7 @@ declare global {
 
 const CLIENT_ID =
   import.meta.env.VITE_GOOGLE_CLIENT_ID ||
-  '636125238631-u5armdp3pd15nr6tiaq1tonvjbu2mkpe.apps.googleusercontent.com';
+  '636125238631-ogb8gfuglqji2u9gn6tj5hmkhb39pcb5.apps.googleusercontent.com';
 
 const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
 
