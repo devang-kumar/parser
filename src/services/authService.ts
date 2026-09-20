@@ -54,6 +54,24 @@ class AuthService {
     }
   }
 
+  async googleAuth(googleAccessToken: string, userInfo?: any): Promise<AuthResponse> {
+    try {
+      const res = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: googleAccessToken, userInfo }),
+      });
+      const data = await res.json();
+
+      if (data.success && data.token && data.user) {
+        localStorage.setItem(this.SESSION_KEY, JSON.stringify({ token: data.token, user: data.user }));
+      }
+      return data;
+    } catch (error: any) {
+      return { success: false, message: error.message || 'Network error' };
+    }
+  }
+
   logout(): void {
     localStorage.removeItem(this.SESSION_KEY);
   }

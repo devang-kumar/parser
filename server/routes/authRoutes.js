@@ -94,6 +94,76 @@ router.post('/signup', async (req, res) => {
   }
 });
 
+// Google OAuth Login / Signup
+router.post('/google', async (req, res) => {
+  try {
+    const { token: googleAccessToken, userInfo } = req.body;
+
+    let email = userInfo?.email;
+    let name = userInfo?.name;
+    let googleId = userInfo?.id || userInfo?.sub;
+
+    // Verify or fetch user info from Google if not passed or to be secure
+    if (googleAccessToken && (!email || !googleId)) {
+      const googleRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${googleAccessToken}` },
+      });
+      if (googleRes.ok) {
+        const data = await googleRes.json();
+        email = data.email;
+        name = data.name || email.split('@')[0];
+        googleId = data.sub;
+      }
+    }
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Google authentication failed: Email not found.' });
+    }
+
+    let user = await User.findOne({ email });
+
+    if (user) {
+      if (user.status === 'blocked') {
+        return res.status(403).json({ success: false, message: 'Account is blocked. Contact administrator.' });
+      }
+      if (!user.googleId) {
+        user.googleId = googleId;
+      }
+      user.lastLogin = new Date();
+      await user.save();
+    } else {
+      // Create new user automatically
+      const colors = ['bg-indigo-600', 'bg-blue-600', 'bg-emerald-600', 'bg-purple-600', 'bg-rose-600'];
+      const randomColor = colors[Math.floor(Math.random() * colors.length)];
+
+      user = new User({
+        name: name || email.split('@')[0],
+        email,
+        googleId,
+        role: 'user',
+        avatarColor: randomColor,
+        lastLogin: new Date(),
+      });
+      await user.save();
+    }
+
+    const token = generateToken(user);
+    const userObj = {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+      avatarColor: user.avatarColor,
+    };
+
+    res.json({ success: true, token, user: userObj });
+  } catch (error) {
+    console.error('Google auth server error:', error);
+    res.status(500).json({ success: false, message: 'Server error during Google authentication' });
+  }
+});
+
 // Get current user details
 router.get('/me', requireAuth, async (req, res) => {
   try {

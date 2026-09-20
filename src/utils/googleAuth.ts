@@ -10,10 +10,29 @@ const CLIENT_ID =
   import.meta.env.VITE_GOOGLE_CLIENT_ID ||
   '636125238631-ogb8gfuglqji2u9gn6tj5hmkhb39pcb5.apps.googleusercontent.com';
 
-const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
+const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file email profile openid';
 
 let tokenClient: any = null;
 let accessToken: string | null = null;
+
+/**
+ * Fetch Google User Profile using the access token
+ */
+export async function getGoogleUserProfile(token: string): Promise<{ id: string; email: string; name: string; picture?: string }> {
+  const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error('Failed to retrieve user profile from Google');
+  }
+  const data = await res.json();
+  return {
+    id: data.sub,
+    email: data.email,
+    name: data.name || data.email?.split('@')[0],
+    picture: data.picture,
+  };
+}
 
 /**
  * Initialize Google Token Client if Google script is loaded
