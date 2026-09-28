@@ -544,9 +544,16 @@ function extractTransactionFromLine(
     return null;
   }
 
-  // 5. Clean and parse amount
-  let cleanAmountStr = rawAmountStr.replace(/[\$Ss§,\s]/g, '');
+  // 5. Clean and parse amount with complete Unicode dash normalization
+  let cleanAmountStr = rawAmountStr
+    .replace(/[\u2013\u2014\u2212]/g, '-')
+    .replace(/[\$Ss§,\s]/g, '');
   let isCredit = false;
+  const hasExplicitPlus = cleanAmountStr.startsWith('+');
+
+  if (hasExplicitPlus) {
+    cleanAmountStr = cleanAmountStr.slice(1);
+  }
 
   // Handle accounting parentheses: (50.00) = credit / negative
   if (cleanAmountStr.startsWith('(') && cleanAmountStr.endsWith(')')) {
@@ -575,14 +582,19 @@ function extractTransactionFromLine(
   let pricePaid = parseFloat(cleanAmountStr);
   if (isNaN(pricePaid)) return null;
 
+  // Round to exactly 2 decimal places to prevent floating-point artifacts
+  pricePaid = Math.round(pricePaid * 100) / 100;
+
   // Determine credit vs debit vs payment
   const isPaymentOrCreditText = /PAYMENT|CREDIT|THANK YOU|REFUND|REVERSAL|DEPOSIT|DIRECT DEP|PAYROLL|ACH CREDIT|CASHBACK|BONUS/i.test(description);
 
   let isNegative = false;
-  if (isCredit || sectionHint === 'PAYMENTS') {
-    isNegative = true;
-  } else if (sectionHint !== 'PURCHASES' && isPaymentOrCreditText) {
-    isNegative = true;
+  if (!hasExplicitPlus) {
+    if (isCredit || sectionHint === 'PAYMENTS') {
+      isNegative = true;
+    } else if (sectionHint !== 'PURCHASES' && isPaymentOrCreditText) {
+      isNegative = true;
+    }
   }
 
   if (isNegative && pricePaid > 0) {
