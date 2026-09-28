@@ -61,17 +61,19 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Actions */}
         <div className="flex items-center gap-3">
-          <button
-            onClick={onOpenSheetsManager}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-2xs"
-            title={isGoogleConnected() ? `Google Linked (${getConnectedGoogleAccount()?.email || 'Active'})` : "Configure Google Sheets"}
-          >
-            <Layers className="h-3.5 w-3.5 text-emerald-600" />
-            <span className="hidden sm:inline">Google Sheets</span>
-            {isGoogleConnected() && (
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block shadow-xs" title="Google Account Connected" />
-            )}
-          </button>
+          {currentUser && (
+            <button
+              onClick={onOpenSheetsManager}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-2xs"
+              title={isGoogleConnected() ? `Google Linked (${getConnectedGoogleAccount()?.email || 'Active'})` : "Configure Google Sheets"}
+            >
+              <Layers className="h-3.5 w-3.5 text-emerald-600" />
+              <span className="hidden sm:inline">Google Sheets</span>
+              {isGoogleConnected() && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block shadow-xs" title="Google Account Connected" />
+              )}
+            </button>
+          )}
           {currentUser ? (
             <div className="relative" ref={dropdownRef}>
               <button

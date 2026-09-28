@@ -232,7 +232,7 @@ export function App() {
 
       {/* Modals & Overlays */}
       
-      {isSheetsManagerOpen && (
+      {isSheetsManagerOpen && currentUser && (
         <SavedSheetsManager
           sheets={savedSheets}
           onAddSheet={handleAddSheet}
