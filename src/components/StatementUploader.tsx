@@ -47,7 +47,7 @@ export const StatementUploader: React.FC<StatementUploaderProps> = ({
           Upload Bank Statements
         </h2>
         <p className="text-xs text-slate-500 mt-1">
-          Securely parse your PDF or CSV bank statements. Drag and drop files below.
+          Securely parse your PDF, Image, or CSV bank statements. Drag and drop files below.
         </p>
       </div>
 
@@ -71,7 +71,7 @@ export const StatementUploader: React.FC<StatementUploaderProps> = ({
           ref={fileInputRef}
           onChange={handleFileChange}
           multiple
-          accept=".pdf,.csv,.txt"
+          accept=".pdf,.csv,.txt,image/*,.png,.jpg,.jpeg,.webp"
           className="hidden"
         />
 
@@ -85,7 +85,7 @@ export const StatementUploader: React.FC<StatementUploaderProps> = ({
             </p>
           </div>
           <span className="text-xs font-medium text-slate-400">
-            Supports PDF, CSV & TXT files
+            Supports PDF, Images (PNG, JPG, WebP), CSV & TXT files
           </span>
         </div>
       </div>

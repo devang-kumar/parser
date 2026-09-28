@@ -223,6 +223,7 @@ export function App() {
               onUpdateTransaction={handleUpdateTransaction}
               onDeleteTransaction={handleDeleteTransaction}
               onClearAll={handleClearAll}
+              onOpenSheetsManager={() => setIsSheetsManagerOpen(true)}
             />
           )}
         </div>

@@ -19,23 +19,171 @@ interface SpatialLine {
   fullText: string;
 }
 
+import { createWorker } from 'tesseract.js';
+
 /**
- * Main parser function supporting PDF, CSV, and Text files
+ * Main parser function supporting PDF, CSV, Text, and Image files
  */
 export async function parseStatementFile(
   file: File,
   fileId: string,
   group: GroupType
 ): Promise<TransactionRow[]> {
-  const extension = file.name.split('.').pop()?.toLowerCase();
+  const extension = file.name.split('.').pop()?.toLowerCase() || '';
 
   if (extension === 'pdf') {
     return await parsePDFStatement(file, fileId, group);
   } else if (extension === 'csv' || extension === 'txt') {
     return await parseCSVStatement(file, fileId, group);
+  } else if (['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff', 'gif'].includes(extension)) {
+    return await parseImageStatement(file, fileId, group);
   } else {
-    throw new Error(`Unsupported file type: .${extension}. Please upload a PDF or CSV statement.`);
+    throw new Error(`Unsupported file type: .${extension}. Please upload a PDF, image (PNG/JPG), or CSV statement.`);
   }
+}
+
+/**
+ * Parses image statements using Tesseract OCR
+ */
+async function parseImageStatement(
+  file: File,
+  fileId: string,
+  group: GroupType
+): Promise<TransactionRow[]> {
+  const worker = await createWorker('eng');
+  try {
+    const ret = await worker.recognize(file);
+    const text = ret.data.text || '';
+    const rawLines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+
+    const statementYear = detectStatementYear(text);
+    const allTransactions: TransactionRow[] = [];
+    let globalLineCounter = 1;
+    let currentSection: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'UNKNOWN' = 'UNKNOWN';
+
+    let i = 0;
+    while (i < rawLines.length) {
+      const rawLine = rawLines[i];
+      const isTxDate = matchUniversalDate(rawLine, statementYear) !== null;
+
+      if (!isTxDate) {
+        if (/PAYMENTS AND OTHER CREDITS|PAYMENTS, CREDITS/i.test(rawLine)) {
+          currentSection = 'PAYMENTS';
+          i++;
+          continue;
+        } else if (/(?:STANDARD\s+)?PURCHASES|PURCHASES PRIOR TO|TRANSACTIONS|CHARGES/i.test(rawLine) && !/TOTAL|SUBTOTAL|YEAR-TO-DATE|SUMMARY/i.test(rawLine)) {
+          currentSection = 'PURCHASES';
+          i++;
+          continue;
+        } else if (/FEES CHARGED|FEES AND INTEREST/i.test(rawLine)) {
+          currentSection = 'FEE';
+          i++;
+          continue;
+        } else if (/^\s*INTEREST CHARGED\s*$/i.test(rawLine) || (/INTEREST CHARGED/i.test(rawLine) && !/CALCULATION|TOTAL INTEREST|\d+\.\d{2}/i.test(rawLine))) {
+          currentSection = 'FEE';
+          i++;
+          continue;
+        }
+      }
+
+      const spatialLine: SpatialLine = {
+        y: 0,
+        items: [],
+        fullText: rawLine,
+      };
+
+      let parsed = extractTransactionFromLine(spatialLine, fileId, file.name, globalLineCounter, group, currentSection, statementYear);
+
+      if (!parsed && isTxDate) {
+        let mergedText = rawLine;
+        let nextIdx = i + 1;
+        while (nextIdx < rawLines.length && nextIdx <= i + 2) {
+          const nextText = rawLines[nextIdx];
+          if (matchUniversalDate(nextText, statementYear) !== null) break;
+          if (/PAYMENTS|PURCHASES|FEES CHARGED|ACCOUNT SUMMARY|PREVIOUS BALANCE/i.test(nextText)) break;
+
+          mergedText += ' ' + nextText;
+          const mergedLine: SpatialLine = { y: 0, items: [], fullText: mergedText };
+          parsed = extractTransactionFromLine(mergedLine, fileId, file.name, globalLineCounter, group, currentSection, statementYear);
+          if (parsed) {
+            i = nextIdx;
+            break;
+          }
+          nextIdx++;
+        }
+      }
+
+      if (parsed) {
+        allTransactions.push(parsed);
+        globalLineCounter++;
+      }
+      i++;
+    }
+
+    markDuplicates(allTransactions);
+    return allTransactions;
+  } finally {
+    await worker.terminate();
+  }
+}
+
+/**
+ * Scans statement text for billing period dates or statement dates to detect context year
+ */
+function detectStatementYear(text: string): string | null {
+  const normalized = text.replace(/\s+/g, ' ');
+
+  // Look for Billing Period, Statement Period, Account Period e.g. "Billing Period: 09/11/25-10/10/25"
+  const periodMatch = normalized.match(/(?:Billing|Statement|Account)\s+Period[:\s]+(?:\d{1,2}[\/\.-]\d{1,2}[\/\.-](\d{2,4}))?[^\d\n]+(?:\d{1,2}[\/\.-]\d{1,2}[\/\.-](\d{2,4}))/i);
+  if (periodMatch) {
+    const yr = periodMatch[2] || periodMatch[1];
+    if (yr) {
+      return yr.length === 2 ? `20${yr}` : yr;
+    }
+  }
+
+  // Check Closing Date / Statement Date / Payment Due Date / New Balance as of / Purchases Prior to
+  const dateHeaderMatch = normalized.match(/(?:Closing\s+Date|Statement\s+Date|New\s+balance\s+as\s+of|Payment\s+due\s+date|Purchases\s+Prior\s+to|through|ending)[:\s]+\d{1,2}[\/\.-]\d{1,2}[\/\.-](\d{2,4})/i);
+  if (dateHeaderMatch && dateHeaderMatch[1]) {
+    const yr = dateHeaderMatch[1];
+    return yr.length === 2 ? `20${yr}` : yr;
+  }
+
+  // Check "2025 totals year-to-date" or "Year-to-date totals (2025)"
+  const ytdMatch = normalized.match(/\b(202[0-9]|203[0-9])\s+(?:totals\s+)?year-to-date/i);
+  if (ytdMatch) {
+    return ytdMatch[1];
+  }
+
+  // Scan all 4-digit years in dates
+  const all4DigitYears = [...normalized.matchAll(/\b\d{1,2}[\/\.-]\d{1,2}[\/\.-](202[0-9]|203[0-9])\b/g)];
+  if (all4DigitYears.length > 0) {
+    const counts = new Map<string, number>();
+    for (const m of all4DigitYears) {
+      counts.set(m[1], (counts.get(m[1]) || 0) + 1);
+    }
+    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    return sorted[0][0];
+  }
+
+  // Scan any dates with 2-digit years >= 20 (e.g. 10/01/25)
+  const all2DigitYears = [...normalized.matchAll(/\b\d{1,2}[\/\.-]\d{1,2}[\/\.-](2[0-9])\b/g)];
+  if (all2DigitYears.length > 0) {
+    const counts = new Map<string, number>();
+    for (const m of all2DigitYears) {
+      counts.set(`20${m[1]}`, (counts.get(`20${m[1]}`) || 0) + 1);
+    }
+    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    return sorted[0][0];
+  }
+
+  // Fallback to standalone year, excluding "Member Since" and copyright
+  const textWithoutMemberSince = normalized.replace(/Member\s+Since\s+\d{4}|©\s*\d{4}/gi, '');
+  const yearMatch = textWithoutMemberSince.match(/\b(202[0-9]|203[0-9])\b/);
+  if (yearMatch) {
+    return yearMatch[1];
+  }
+  return null;
 }
 
 /**
@@ -53,6 +201,19 @@ async function parsePDFStatement(
 
   const allTransactions: TransactionRow[] = [];
   let globalLineCounter = 1;
+  let statementYear: string | null = null;
+
+  // Pre-scan first page or full document for statement year
+  for (let p = 1; p <= Math.min(2, pdf.numPages); p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const pageText = content.items.map((it: any) => it.str).join(' ');
+    const detected = detectStatementYear(pageText);
+    if (detected) {
+      statementYear = detected;
+      break;
+    }
+  }
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
@@ -98,30 +259,70 @@ async function parsePDFStatement(
       line.fullText = line.items.map((i) => i.str).join(' ').replace(/\s+/g, ' ').trim();
     }
 
-    // 4. Parse transaction rows from reconstructed physical lines
+    // 4. Parse transaction rows from reconstructed physical lines with multi-line lookahead
     let currentSection: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'UNKNOWN' = 'UNKNOWN';
-
-    for (const line of lines) {
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
       const text = line.fullText;
 
-      // Section headers check
-      if (/PAYMENTS AND OTHER CREDITS/i.test(text)) {
-        currentSection = 'PAYMENTS';
-        continue;
-      } else if (/PURCHASE|TRANSACTIONS|CHARGES/i.test(text) && !/TOTAL|SUBTOTAL|YEAR-TO-DATE|SUMMARY/i.test(text)) {
-        currentSection = 'PURCHASES';
-        continue;
-      } else if (/FEES AND INTEREST/i.test(text)) {
-        currentSection = 'FEE';
-        continue;
+      const isTxDate = matchUniversalDate(text, statementYear) !== null;
+
+      // Section headers check ONLY when line does not start with a date
+      if (!isTxDate) {
+        if (/PAYMENTS AND OTHER CREDITS|PAYMENTS, CREDITS AND ADJUSTMENTS|PAYMENTS, CREDITS/i.test(text)) {
+          currentSection = 'PAYMENTS';
+          i++;
+          continue;
+        } else if (/(?:STANDARD\s+)?PURCHASES|PURCHASES PRIOR TO|TRANSACTIONS|CHARGES/i.test(text) && !/TOTAL|SUBTOTAL|YEAR-TO-DATE|SUMMARY/i.test(text)) {
+          currentSection = 'PURCHASES';
+          i++;
+          continue;
+        } else if (/FEES CHARGED|FEES AND INTEREST/i.test(text)) {
+          currentSection = 'FEE';
+          i++;
+          continue;
+        } else if (/^\s*INTEREST CHARGED\s*$/i.test(text) || (/INTEREST CHARGED/i.test(text) && !/CALCULATION|TOTAL INTEREST|\d+\.\d{2}/i.test(text))) {
+          currentSection = 'FEE';
+          i++;
+          continue;
+        }
       }
 
       // Try extracting transaction from this specific line
-      const parsed = extractTransactionFromLine(line, fileId, file.name, globalLineCounter, group, currentSection);
+      let parsed = extractTransactionFromLine(line, fileId, file.name, globalLineCounter, group, currentSection, statementYear);
+
+      // Multi-line continuation: if this line has a date but no amount, check subsequent lines for the amount
+      if (!parsed && isTxDate) {
+        let mergedText = text;
+        const mergedItems = [...line.items];
+        let nextIdx = i + 1;
+        while (nextIdx < lines.length && nextIdx <= i + 2) {
+          const nextLine = lines[nextIdx];
+          if (matchUniversalDate(nextLine.fullText, statementYear) !== null) break;
+          if (/PAYMENTS|PURCHASES|FEES CHARGED|ACCOUNT SUMMARY|PREVIOUS BALANCE/i.test(nextLine.fullText)) break;
+
+          mergedText += ' ' + nextLine.fullText;
+          mergedItems.push(...nextLine.items);
+          const combinedLine: SpatialLine = {
+            y: line.y,
+            items: mergedItems,
+            fullText: mergedText,
+          };
+          parsed = extractTransactionFromLine(combinedLine, fileId, file.name, globalLineCounter, group, currentSection, statementYear);
+          if (parsed) {
+            i = nextIdx;
+            break;
+          }
+          nextIdx++;
+        }
+      }
+
       if (parsed) {
         allTransactions.push(parsed);
         globalLineCounter++;
       }
+      i++;
     }
   }
 
@@ -161,9 +362,9 @@ interface ParsedDateMatch {
   remainingText: string;
 }
 
-function matchUniversalDate(rawText: string): ParsedDateMatch | null {
-  // Strip optional row numbers or card identifiers up to 6 digits (e.g. "6959 ", "001 ", "#1 ")
-  const prefixMatch = rawText.match(/^(?:#?\d{1,6}\s+)/);
+function matchUniversalDate(rawText: string, contextYear?: string | null): ParsedDateMatch | null {
+  // Strip optional OCR margin artifacts, bullet points, row numbers or card identifiers (e.g. "o ", "= ", "w ", "#1 ", "6959 ", "| ")
+  const prefixMatch = rawText.match(/^(?:(?:[=~_•\*\-\|\/\\oOwWcC»«\>\<\:\;]|\b#?\d{1,6}\b)\s+)+/);
   const offset = prefixMatch ? prefixMatch[0].length : 0;
   const text = rawText.slice(offset).trim();
 
@@ -185,8 +386,9 @@ function matchUniversalDate(rawText: string): ParsedDateMatch | null {
   if (numericMatch) {
     const [, m, d, y] = numericMatch;
     if (isValidDateParts(m, d)) {
+      const yearToUse = y || contextYear || undefined;
       return {
-        dateStr: formatDate(`${m}/${d}${y ? '/' + y : ''}`),
+        dateStr: formatDate(`${m}/${d}${yearToUse ? '/' + yearToUse : ''}`, contextYear),
         matchedText: numericMatch[0],
         remainingText: text.slice(numericMatch[0].length).trim(),
       };
@@ -200,8 +402,9 @@ function matchUniversalDate(rawText: string): ParsedDateMatch | null {
     const cleanMonth = monthStr.toLowerCase().slice(0, 3);
     const m = MONTH_NAME_MAP[cleanMonth];
     if (m && isValidDateParts(m, d)) {
+      const yearToUse = y || contextYear || undefined;
       return {
-        dateStr: formatDate(`${m}/${d}${y ? '/' + y : ''}`),
+        dateStr: formatDate(`${m}/${d}${yearToUse ? '/' + yearToUse : ''}`, contextYear),
         matchedText: monthFirstMatch[0],
         remainingText: text.slice(monthFirstMatch[0].length).trim(),
       };
@@ -215,8 +418,9 @@ function matchUniversalDate(rawText: string): ParsedDateMatch | null {
     const cleanMonth = monthStr.toLowerCase().slice(0, 3);
     const m = MONTH_NAME_MAP[cleanMonth];
     if (m && isValidDateParts(m, d)) {
+      const yearToUse = y || contextYear || undefined;
       return {
-        dateStr: formatDate(`${m}/${d}${y ? '/' + y : ''}`),
+        dateStr: formatDate(`${m}/${d}${yearToUse ? '/' + yearToUse : ''}`, contextYear),
         matchedText: dayFirstMatch[0],
         remainingText: text.slice(dayFirstMatch[0].length).trim(),
       };
@@ -235,7 +439,8 @@ function extractTransactionFromLine(
   fileName: string,
   lineNum: number,
   group: GroupType,
-  sectionHint: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'UNKNOWN'
+  sectionHint: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'UNKNOWN',
+  contextYear?: string | null
 ): TransactionRow | null {
   const text = line.fullText;
 
@@ -246,19 +451,19 @@ function extractTransactionFromLine(
     /\bYEAR-TO-DATE\b|\bTOTAL FEES CHARGED\b|\bTOTAL INTEREST CHARGED\b|\bBALANCE SUBJECT TO\b|\bINTEREST CHARGES\b|\bAUTOPAY IS ON\b/i.test(text) ||
     /\bCUSTOMER SERVICE\b|\bMANAGE YOUR ACCOUNT\b|\bDOWNLOAD THE\b|\bCHASE MOBILE\b|\bLATE PAYMENT WARNING\b|\bMINIMUM PAYMENT WARNING\b/i.test(text) ||
     /\bFEE SUMMARY\b|\bPROMOTIONAL RATE\b|\bAPR FOR\b|\bPURCHASES AND ADVANCES\b|\bSTATEMENT CLOSING\b|\bAMOUNT PAST DUE\b|\bFOR INQUIRIES\b/i.test(text) ||
-    /\bBILLING PERIOD\b|\bSTATEMENT PERIOD\b|\bACCOUNT NUMBER\b|\bNOTICE: SEE REVERSE\b|\bTHIS PAGE INTENTIONALLY LEFT BLANK\b/i.test(text) ||
+    /\bBILLING PERIOD\b|\bSTATEMENT PERIOD\b|^\s*ACCOUNT NUMBER\b|\bACCOUNT NUMBER:\b|\bNOTICE: SEE REVERSE\b|\bTHIS PAGE INTENTIONALLY LEFT BLANK\b/i.test(text) ||
     /\bEXCLUSIONS APPLY\b|\bPROMO CODE\b|\bGREAT THINGS HAPPEN\b|\bIMPORTANT INFORMATION ABOUT\b/i.test(text)
   ) {
     return null;
   }
 
-  // Reject standalone phone numbers or web addresses
-  if (/^1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}$/.test(text) || /^(https?:\/\/|www\.)\S+$/i.test(text)) {
+  // Reject standalone phone numbers or web addresses (ONLY if the entire line is just a phone or URL)
+  if (/^\s*1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\s*$/.test(text) || /^\s*(https?:\/\/|www\.)\S+\s*$/i.test(text)) {
     return null;
   }
 
   // 2. Extract Primary Date
-  const dateMatch = matchUniversalDate(text);
+  const dateMatch = matchUniversalDate(text, contextYear);
   if (!dateMatch) {
     return null;
   }
@@ -268,7 +473,7 @@ function extractTransactionFromLine(
 
   // 3. Clean secondary date (Post Date / Process Date), Reference Numbers, Check Numbers
   // If next token is another date (e.g. "07/21 07/21"), consume it
-  const postDateMatch = matchUniversalDate(remaining);
+  const postDateMatch = matchUniversalDate(remaining, contextYear);
   if (postDateMatch) {
     remaining = postDateMatch.remainingText;
   }
@@ -284,11 +489,12 @@ function extractTransactionFromLine(
 
   // 4. Extract Amount at the end of the line
   // Supports:
-  // - Standard positive / negative: $12.34, 1,234.56, -45.00, +50.00
-  // - Accounting parentheses: (12.34), ($1,000.00)
+  // - Standard positive / negative: $12.34, 1,234.56, -45.00, +50.00, - $45.00
+  // - Accounting parentheses: (12.34), ($1,000.00), ( $12.34 )
   // - Credit indicators: 45.00 CR, 100.00-, 50.00-
   // - Dual column balance output: e.g. "DEPOSIT 500.00  BALANCE 1,200.00" -> captures transaction amount
-  const amountRegex = /(\(?[-+]?\$?\s?\d{1,3}(?:,\d{3})*\.\d{2}(?:\s?CR)?-?\)?)(?:\s+[-+]?\$?\s?\d{1,3}(?:,\d{3})*\.\d{2})?$/i;
+  // - OCR dollar misrecognitions: S, s, § e.g. -S146.82
+  const amountRegex = /(\(?[-+]?\s*[\$Ss§]?\s*\d{1,3}(?:,\d{3})*\.\d{2}(?:\s?CR)?-?\)?)(?:\s+[-+]?\s*[\$Ss§]?\s*\d{1,3}(?:,\d{3})*\.\d{2})?$/i;
   const amountMatch = remaining.match(amountRegex);
 
   if (!amountMatch) {
@@ -296,7 +502,8 @@ function extractTransactionFromLine(
   }
 
   const rawAmountStr = amountMatch[1];
-  const description = remaining.slice(0, remaining.lastIndexOf(rawAmountStr)).trim();
+  let description = remaining.slice(0, remaining.lastIndexOf(rawAmountStr)).trim();
+  description = cleanDescription(description);
 
   // Validate description is meaningful
   if (!description || description.length < 2) {
@@ -312,7 +519,7 @@ function extractTransactionFromLine(
   }
 
   // 5. Clean and parse amount
-  let cleanAmountStr = rawAmountStr.replace(/[\$,\s]/g, '');
+  let cleanAmountStr = rawAmountStr.replace(/[\$Ss§,\s]/g, '');
   let isCredit = false;
 
   // Handle accounting parentheses: (50.00) = credit / negative
@@ -333,11 +540,17 @@ function extractTransactionFromLine(
     cleanAmountStr = cleanAmountStr.slice(0, -1);
   }
 
+  // Handle leading minus: -50.00
+  if (cleanAmountStr.startsWith('-')) {
+    isCredit = true;
+    cleanAmountStr = cleanAmountStr.slice(1);
+  }
+
   let pricePaid = parseFloat(cleanAmountStr);
   if (isNaN(pricePaid)) return null;
 
   // Determine credit vs debit vs payment
-  const isPaymentOrCreditText = /PAYMENT|CREDIT|THANK YOU|REFUND|REVERSAL|DEPOSIT|DIRECT DEP|PAYROLL|ACH CREDIT|CASHBACK/i.test(description);
+  const isPaymentOrCreditText = /PAYMENT|CREDIT|THANK YOU|REFUND|REVERSAL|DEPOSIT|DIRECT DEP|PAYROLL|ACH CREDIT|CASHBACK|BONUS/i.test(description);
 
   if (isCredit || sectionHint === 'PAYMENTS' || isPaymentOrCreditText) {
     if (pricePaid > 0) pricePaid = -pricePaid;
@@ -350,10 +563,10 @@ function extractTransactionFromLine(
   let txType: TransactionType = 'PURCHASE';
   if (pricePaid < 0 || isPaymentOrCreditText || sectionHint === 'PAYMENTS') {
     txType = 'CREDIT';
-  } else if (/FEE|SURCHARGE|LATE CHARGE|OVERDRAFT|ANNUAL FEE/i.test(description) || sectionHint === 'FEE') {
-    txType = 'FEE';
   } else if (/INTEREST CHARGE|FINANCE CHARGE/i.test(description)) {
     txType = 'INTEREST';
+  } else if (/FEE|SURCHARGE|LATE CHARGE|OVERDRAFT|ANNUAL FEE/i.test(description) || sectionHint === 'FEE') {
+    txType = 'FEE';
   }
 
   return {
@@ -364,7 +577,7 @@ function extractTransactionFromLine(
     date: rawDate,
     pricePaid,
     pricePaidFormatted,
-    chargeInformation: cleanDescription(description),
+    chargeInformation: description,
     type: txType,
     rawLine: text,
     confidenceScore: 100,
@@ -434,13 +647,13 @@ async function parseCSVStatement(
 /**
  * Format raw date string into standard MM/DD/YYYY
  */
-function formatDate(dateStr: string): string {
+function formatDate(dateStr: string, fallbackYear?: string | null): string {
   if (!dateStr) return '';
   const parts = dateStr.split(/[\/\.-]/);
   if (parts.length >= 2) {
     const month = parts[0].padStart(2, '0');
     const day = parts[1].padStart(2, '0');
-    let year = parts[2] || new Date().getFullYear().toString();
+    let year = parts[2] || fallbackYear || new Date().getFullYear().toString();
     if (year.length === 2) year = `20${year}`;
     return `${month}/${day}/${year}`;
   }
@@ -452,7 +665,8 @@ function formatDate(dateStr: string): string {
  */
 function cleanDescription(desc: string): string {
   return desc
-    .replace(/^[\*\:\-\#\s]+/, '')
+    .replace(/^[\*\:\-\#~=_•\|\s]+/, '')
+    .replace(/[\*\:\-\#~=_•\|\s]+$/, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
