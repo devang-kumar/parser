@@ -67,20 +67,9 @@ async function parseImageStatement(
       const isTxDate = matchUniversalDate(rawLine, statementYear) !== null;
 
       if (!isTxDate) {
-        if (/PAYMENTS AND OTHER CREDITS|PAYMENTS, CREDITS/i.test(rawLine)) {
-          currentSection = 'PAYMENTS';
-          i++;
-          continue;
-        } else if (/(?:STANDARD\s+)?PURCHASES|PURCHASES PRIOR TO|TRANSACTIONS|CHARGES/i.test(rawLine) && !/TOTAL|SUBTOTAL|YEAR-TO-DATE|SUMMARY/i.test(rawLine)) {
-          currentSection = 'PURCHASES';
-          i++;
-          continue;
-        } else if (/FEES CHARGED|FEES AND INTEREST/i.test(rawLine)) {
-          currentSection = 'FEE';
-          i++;
-          continue;
-        } else if (/^\s*INTEREST CHARGED\s*$/i.test(rawLine) || (/INTEREST CHARGED/i.test(rawLine) && !/CALCULATION|TOTAL INTEREST|\d+\.\d{2}/i.test(rawLine))) {
-          currentSection = 'FEE';
+        const detected = detectSectionHeader(rawLine);
+        if (detected) {
+          currentSection = detected;
           i++;
           continue;
         }
@@ -100,7 +89,7 @@ async function parseImageStatement(
         while (nextIdx < rawLines.length && nextIdx <= i + 2) {
           const nextText = rawLines[nextIdx];
           if (matchUniversalDate(nextText, statementYear) !== null) break;
-          if (/PAYMENTS|PURCHASES|FEES CHARGED|ACCOUNT SUMMARY|PREVIOUS BALANCE/i.test(nextText)) break;
+          if (detectSectionHeader(nextText) !== null || /ACCOUNT SUMMARY|PREVIOUS BALANCE/i.test(nextText)) break;
 
           mergedText += ' ' + nextText;
           const mergedLine: SpatialLine = { y: 0, items: [], fullText: mergedText };
@@ -133,8 +122,8 @@ async function parseImageStatement(
 function detectStatementYear(text: string): string | null {
   const normalized = text.replace(/\s+/g, ' ');
 
-  // Look for Billing Period, Statement Period, Account Period e.g. "Billing Period: 09/11/25-10/10/25"
-  const periodMatch = normalized.match(/(?:Billing|Statement|Account)\s+Period[:\s]+(?:\d{1,2}[\/\.-]\d{1,2}[\/\.-](\d{2,4}))?[^\d\n]+(?:\d{1,2}[\/\.-]\d{1,2}[\/\.-](\d{2,4}))/i);
+  // Look for Billing Period, Statement Period, Account Period, Opening/Closing Date
+  const periodMatch = normalized.match(/(?:Billing|Statement|Account|Opening\/Closing|Opening)\s+(?:Period|Date)?[:\s]+(?:\d{1,2}[\/\.-]\d{1,2}[\/\.-](\d{2,4}))?[^\d\n]+(?:\d{1,2}[\/\.-]\d{1,2}[\/\.-](\d{2,4}))/i);
   if (periodMatch) {
     const yr = periodMatch[2] || periodMatch[1];
     if (yr) {
@@ -143,10 +132,16 @@ function detectStatementYear(text: string): string | null {
   }
 
   // Check Closing Date / Statement Date / Payment Due Date / New Balance as of / Purchases Prior to
-  const dateHeaderMatch = normalized.match(/(?:Closing\s+Date|Statement\s+Date|New\s+balance\s+as\s+of|Payment\s+due\s+date|Purchases\s+Prior\s+to|through|ending)[:\s]+\d{1,2}[\/\.-]\d{1,2}[\/\.-](\d{2,4})/i);
+  const dateHeaderMatch = normalized.match(/(?:Closing\s+Date|Statement\s+Date|New\s+balance\s+as\s+of|Payment\s+due\s+date|Due\s+Date|Purchases\s+Prior\s+to|through|ending)[:\s]+\d{1,2}[\/\.-]\d{1,2}[\/\.-](\d{2,4})/i);
   if (dateHeaderMatch && dateHeaderMatch[1]) {
     const yr = dateHeaderMatch[1];
     return yr.length === 2 ? `20${yr}` : yr;
+  }
+
+  // Check Month + 4-digit year e.g. "August 2026"
+  const monthYearMatch = normalized.match(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+(202[0-9]|203[0-9])\b/i);
+  if (monthYearMatch) {
+    return monthYearMatch[1];
   }
 
   // Check "2025 totals year-to-date" or "Year-to-date totals (2025)"
@@ -166,7 +161,7 @@ function detectStatementYear(text: string): string | null {
     return sorted[0][0];
   }
 
-  // Scan any dates with 2-digit years >= 20 (e.g. 10/01/25)
+  // Scan any dates with 2-digit years >= 20 (e.g. 10/01/25, 07/23/26)
   const all2DigitYears = [...normalized.matchAll(/\b\d{1,2}[\/\.-]\d{1,2}[\/\.-](2[0-9])\b/g)];
   if (all2DigitYears.length > 0) {
     const counts = new Map<string, number>();
@@ -187,6 +182,48 @@ function detectStatementYear(text: string): string | null {
 }
 
 /**
+ * Detects whether a line represents a transaction section header
+ * Supports Credit Card (Chase, Amex, Capital One, Citi, Discover, BofA, Wells Fargo, etc.)
+ * and Bank Checking/Savings statements (Deposits, Withdrawals, Debits, Credits, Checks, etc.)
+ */
+function detectSectionHeader(text: string): 'PAYMENTS' | 'PURCHASES' | 'FEE' | null {
+  const clean = text.trim();
+  if (!clean || /TOTAL|SUBTOTAL|YEAR-TO-DATE|SUMMARY|WARNING|CALCULATION/i.test(clean)) {
+    return null;
+  }
+
+  // 1. Payments, Credits, Deposits
+  if (
+    /\b(?:PAYMENTS?\s+(?:AND|&|\+)\s+(?:OTHER\s+)?CREDITS?|PAYMENTS?,?\s*CREDITS?\s+(?:AND|&|\+)\s+ADJUSTMENTS?|PAYMENTS?\s+(?:AND|&|\+)\s+CREDITS?|DEPOSITS?\s+(?:AND|&|\+)\s+ADDITIONS?|DEPOSITS?\s+(?:AND|&|\+)\s+(?:OTHER\s+)?CREDITS?|CREDIT\s+TRANSACTIONS?)\b/i.test(clean) ||
+    /^\s*(?:PAYMENTS?|CREDITS?|DEPOSITS?)\s*$/i.test(clean)
+  ) {
+    return 'PAYMENTS';
+  }
+
+  // 2. Purchases, Debits, Withdrawals, Charges, Transactions
+  if (
+    /\b(?:STANDARD\s+)?PURCHASES?\b|\bPURCHASES?\s+(?:AND|&|\+)\s+OTHER\s+CHARGES?\b|\bPURCHASES?\s+(?:AND|&|\+)\s+(?:OTHER\s+)?DEBITS?\b|\bPURCHASES?\s+(?:AND|&|\+)\s+ADJUSTMENTS?\b|\bPURCHASES?\s+PRIOR\s+TO\b|\bNEW\s+CHARGES?\b|\bTRANSACTIONS?\b|\bCHARGES?\s+(?:AND|&|\+)\s+OTHER\s+DEBITS?\b|\bCHARGES?\s+(?:AND|&|\+)\s+OTHER\s+PURCHASES?\b|\bWITHDRAWALS?\s+(?:AND|&|\+)\s+DEDUCTIONS?\b|\bWITHDRAWALS?\s+(?:AND|&|\+)\s+OTHER\s+DEBITS?\b|\bATM\s+(?:&|AND|\+)\s+DEBIT\s+CARD\s+WITHDRAWALS?\b|\bCHECKS?\s+PAID\b|\bELECTRONIC\s+WITHDRAWALS?\b|\bDEBIT\s+CARD\s+PURCHASES?\b/i.test(clean) ||
+    /^\s*(?:PURCHASES?|CHARGES?|WITHDRAWALS?|DEBITS?)\s*$/i.test(clean)
+  ) {
+    if (!/INTEREST|FEE|BALANCE/i.test(clean)) {
+      return 'PURCHASES';
+    }
+  }
+
+  // 3. Fees and Interest
+  if (
+    /\bFEES?\s+CHARGED\b|\bFEES?\s+(?:AND|&|\+)\s+INTEREST\b/i.test(clean) ||
+    /^\s*FEES?\s*$/i.test(clean) ||
+    /^\s*INTEREST\s+CHARGED\s*$/i.test(clean) ||
+    (/\bINTEREST\s+CHARGED\b/i.test(clean) && !/\d+\.\d{2}/i.test(clean))
+  ) {
+    return 'FEE';
+  }
+
+  return null;
+}
+
+/**
  * High-Precision Spatial PDF Parser for Bank Statements
  * Groups text elements by exact physical vertical Y-coordinate line to eliminate row mixing
  */
@@ -203,8 +240,8 @@ async function parsePDFStatement(
   let globalLineCounter = 1;
   let statementYear: string | null = null;
 
-  // Pre-scan first page or full document for statement year
-  for (let p = 1; p <= Math.min(2, pdf.numPages); p++) {
+  // Pre-scan all pages for statement year
+  for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
     const pageText = content.items.map((it: any) => it.str).join(' ');
@@ -270,20 +307,9 @@ async function parsePDFStatement(
 
       // Section headers check ONLY when line does not start with a date
       if (!isTxDate) {
-        if (/PAYMENTS AND OTHER CREDITS|PAYMENTS, CREDITS AND ADJUSTMENTS|PAYMENTS, CREDITS/i.test(text)) {
-          currentSection = 'PAYMENTS';
-          i++;
-          continue;
-        } else if (/(?:STANDARD\s+)?PURCHASES|PURCHASES PRIOR TO|TRANSACTIONS|CHARGES/i.test(text) && !/TOTAL|SUBTOTAL|YEAR-TO-DATE|SUMMARY/i.test(text)) {
-          currentSection = 'PURCHASES';
-          i++;
-          continue;
-        } else if (/FEES CHARGED|FEES AND INTEREST/i.test(text)) {
-          currentSection = 'FEE';
-          i++;
-          continue;
-        } else if (/^\s*INTEREST CHARGED\s*$/i.test(text) || (/INTEREST CHARGED/i.test(text) && !/CALCULATION|TOTAL INTEREST|\d+\.\d{2}/i.test(text))) {
-          currentSection = 'FEE';
+        const detected = detectSectionHeader(text);
+        if (detected) {
+          currentSection = detected;
           i++;
           continue;
         }
@@ -300,7 +326,7 @@ async function parsePDFStatement(
         while (nextIdx < lines.length && nextIdx <= i + 2) {
           const nextLine = lines[nextIdx];
           if (matchUniversalDate(nextLine.fullText, statementYear) !== null) break;
-          if (/PAYMENTS|PURCHASES|FEES CHARGED|ACCOUNT SUMMARY|PREVIOUS BALANCE/i.test(nextLine.fullText)) break;
+          if (detectSectionHeader(nextLine.fullText) !== null || /ACCOUNT SUMMARY|PREVIOUS BALANCE/i.test(nextLine.fullText)) break;
 
           mergedText += ' ' + nextLine.fullText;
           mergedItems.push(...nextLine.items);
@@ -552,8 +578,15 @@ function extractTransactionFromLine(
   // Determine credit vs debit vs payment
   const isPaymentOrCreditText = /PAYMENT|CREDIT|THANK YOU|REFUND|REVERSAL|DEPOSIT|DIRECT DEP|PAYROLL|ACH CREDIT|CASHBACK|BONUS/i.test(description);
 
-  if (isCredit || sectionHint === 'PAYMENTS' || isPaymentOrCreditText) {
-    if (pricePaid > 0) pricePaid = -pricePaid;
+  let isNegative = false;
+  if (isCredit || sectionHint === 'PAYMENTS') {
+    isNegative = true;
+  } else if (sectionHint !== 'PURCHASES' && isPaymentOrCreditText) {
+    isNegative = true;
+  }
+
+  if (isNegative && pricePaid > 0) {
+    pricePaid = -pricePaid;
   }
 
   const pricePaidFormatted = pricePaid < 0 
@@ -561,7 +594,7 @@ function extractTransactionFromLine(
     : `$${pricePaid.toFixed(2)}`;
 
   let txType: TransactionType = 'PURCHASE';
-  if (pricePaid < 0 || isPaymentOrCreditText || sectionHint === 'PAYMENTS') {
+  if (pricePaid < 0 || sectionHint === 'PAYMENTS') {
     txType = 'CREDIT';
   } else if (/INTEREST CHARGE|FINANCE CHARGE/i.test(description)) {
     txType = 'INTEREST';
