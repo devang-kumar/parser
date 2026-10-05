@@ -43,6 +43,19 @@ export async function parseStatementFile(
 }
 
 /**
+ * Detects whether statement is a Bank Account (Checking/Savings) or Credit Card
+ */
+function detectAccountType(text: string): 'BANK' | 'CREDIT_CARD' {
+  if (
+    /\b(?:CHECKING\s+SUMMARY|SAVINGS\s+SUMMARY|CHECKING\s+ACCOUNT|SAVINGS\s+ACCOUNT|SECURE\s+CHECKING|DEPOSITS?\s+AND\s+ADDITIONS|ELECTRONIC\s+WITHDRAWALS?|ATM\s+(?:&|AND)\s+DEBIT\s+CARD\s+WITHDRAWALS?|CHECKS?\s+PAID)\b/i.test(text) ||
+    /\bAMOUNT\s+BALANCE\b/i.test(text)
+  ) {
+    return 'BANK';
+  }
+  return 'CREDIT_CARD';
+}
+
+/**
  * Parses image statements using Tesseract OCR
  */
 async function parseImageStatement(
@@ -57,9 +70,10 @@ async function parseImageStatement(
     const rawLines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
 
     const statementYear = detectStatementYear(text);
+    const isBankAccount = detectAccountType(text) === 'BANK';
     const allTransactions: TransactionRow[] = [];
     let globalLineCounter = 1;
-    let currentSection: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'UNKNOWN' = 'UNKNOWN';
+    let currentSection: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'IGNORED' | 'UNKNOWN' = 'UNKNOWN';
 
     let i = 0;
     while (i < rawLines.length) {
@@ -81,19 +95,19 @@ async function parseImageStatement(
         fullText: rawLine,
       };
 
-      let parsed = extractTransactionFromLine(spatialLine, fileId, file.name, globalLineCounter, group, currentSection, statementYear);
+      let parsed = extractTransactionFromLine(spatialLine, fileId, file.name, globalLineCounter, group, currentSection, statementYear, isBankAccount);
 
       if (!parsed && isTxDate) {
         let mergedText = rawLine;
         let nextIdx = i + 1;
-        while (nextIdx < rawLines.length && nextIdx <= i + 2) {
+        while (nextIdx < rawLines.length && nextIdx <= i + 6) {
           const nextText = rawLines[nextIdx];
           if (matchUniversalDate(nextText, statementYear) !== null) break;
           if (detectSectionHeader(nextText) !== null || /ACCOUNT SUMMARY|PREVIOUS BALANCE/i.test(nextText)) break;
 
           mergedText += ' ' + nextText;
           const mergedLine: SpatialLine = { y: 0, items: [], fullText: mergedText };
-          parsed = extractTransactionFromLine(mergedLine, fileId, file.name, globalLineCounter, group, currentSection, statementYear);
+          parsed = extractTransactionFromLine(mergedLine, fileId, file.name, globalLineCounter, group, currentSection, statementYear, isBankAccount);
           if (parsed) {
             i = nextIdx;
             break;
@@ -136,6 +150,12 @@ function detectStatementYear(text: string): string | null {
   if (dateHeaderMatch && dateHeaderMatch[1]) {
     const yr = dateHeaderMatch[1];
     return yr.length === 2 ? `20${yr}` : yr;
+  }
+
+  // Check Month + Day + Year e.g. "Aug 25, 2026 - Sep 23, 2026" or "Oct 18, 2026"
+  const monthDayYearMatch = normalized.match(/\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+(202[0-9]|203[0-9])\b/i);
+  if (monthDayYearMatch) {
+    return monthDayYearMatch[1];
   }
 
   // Check Month + 4-digit year e.g. "August 2026"
@@ -186,26 +206,45 @@ function detectStatementYear(text: string): string | null {
  * Supports Credit Card (Chase, Amex, Capital One, Citi, Discover, BofA, Wells Fargo, etc.)
  * and Bank Checking/Savings statements (Deposits, Withdrawals, Debits, Credits, Checks, etc.)
  */
-function detectSectionHeader(text: string): 'PAYMENTS' | 'PURCHASES' | 'FEE' | null {
-  const clean = text.trim();
-  if (!clean || /TOTAL|SUBTOTAL|YEAR-TO-DATE|SUMMARY|WARNING|CALCULATION/i.test(clean)) {
+function detectSectionHeader(text: string): 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'IGNORED' | null {
+  let clean = text.trim();
+  if (!clean) {
+    return null;
+  }
+
+  // Strip trailing amounts e.g. "Other Credits -$65.64" or "Purchases $1,399.36"
+  clean = clean.replace(/[-+]?\s*[\$]?\d+[\d,]*\.\d{2}/g, '').trim();
+  if (!clean) {
+    return null;
+  }
+
+  // 0. End of transaction sections / summary sections
+  if (
+    /\b(?:INTEREST\s+CHARGE\s+CALCULATION|INTEREST\s+CHARGES?|TOTALS?\s+YEAR-TO-DATE|YEAR-TO-DATE\s+TOTALS?|ACCOUNT\s+NOTIFICATIONS?|ACCOUNT\s+MESSAGES?|CONTACT\s+US|IMPORTANT\s+INFORMATION|REWARDS?\s+SUMMARY|PROTECT\s+YOURSELF\s+FROM\s+SCAMS)\b/i.test(clean) ||
+    /^\s*(?:SUMMARY|CALCULATION|WARNING)\b/i.test(clean)
+  ) {
+    return 'IGNORED';
+  }
+
+  if (/TOTAL|SUBTOTAL/i.test(clean)) {
     return null;
   }
 
   // 1. Payments, Credits, Deposits
   if (
-    /\b(?:PAYMENTS?\s+(?:AND|&|\+)\s+(?:OTHER\s+)?CREDITS?|PAYMENTS?,?\s*CREDITS?\s+(?:AND|&|\+)\s+ADJUSTMENTS?|PAYMENTS?\s+(?:AND|&|\+)\s+CREDITS?|DEPOSITS?\s+(?:AND|&|\+)\s+ADDITIONS?|DEPOSITS?\s+(?:AND|&|\+)\s+(?:OTHER\s+)?CREDITS?|CREDIT\s+TRANSACTIONS?)\b/i.test(clean) ||
+    /\b(?:PAYMENTS?\s+(?:AND|&|\+)\s+(?:OTHER\s+)?CREDITS?|OTHER\s+CREDITS?|PAYMENTS?,?\s*CREDITS?\s+(?:AND|&|\+)\s+ADJUSTMENTS?|PAYMENTS?\s+(?:AND|&|\+)\s+CREDITS?|DEPOSITS?\s+(?:AND|&|\+)\s+ADDITIONS?|DEPOSITS?\s+(?:AND|&|\+)\s+(?:OTHER\s+)?CREDITS?|CREDIT\s+TRANSACTIONS?)\b/i.test(clean) ||
     /^\s*(?:PAYMENTS?|CREDITS?|DEPOSITS?)\s*$/i.test(clean)
   ) {
     return 'PAYMENTS';
   }
 
-  // 2. Purchases, Debits, Withdrawals, Charges, Transactions
+  // 2. Purchases, Debits, Withdrawals, Charges, Transactions, Balance Transfers, Cash Advances
   if (
+    /\b(?:BALANCE\s+TRANSFERS?|CASH\s+ADVANCES?)\b/i.test(clean) ||
     /\b(?:STANDARD\s+)?PURCHASES?\b|\bPURCHASES?\s+(?:AND|&|\+)\s+OTHER\s+CHARGES?\b|\bPURCHASES?\s+(?:AND|&|\+)\s+(?:OTHER\s+)?DEBITS?\b|\bPURCHASES?\s+(?:AND|&|\+)\s+ADJUSTMENTS?\b|\bPURCHASES?\s+PRIOR\s+TO\b|\bNEW\s+CHARGES?\b|\bTRANSACTIONS?\b|\bCHARGES?\s+(?:AND|&|\+)\s+OTHER\s+DEBITS?\b|\bCHARGES?\s+(?:AND|&|\+)\s+OTHER\s+PURCHASES?\b|\bWITHDRAWALS?\s+(?:AND|&|\+)\s+DEDUCTIONS?\b|\bWITHDRAWALS?\s+(?:AND|&|\+)\s+OTHER\s+DEBITS?\b|\bATM\s+(?:&|AND|\+)\s+DEBIT\s+CARD\s+WITHDRAWALS?\b|\bCHECKS?\s+PAID\b|\bELECTRONIC\s+WITHDRAWALS?\b|\bDEBIT\s+CARD\s+PURCHASES?\b/i.test(clean) ||
     /^\s*(?:PURCHASES?|CHARGES?|WITHDRAWALS?|DEBITS?)\s*$/i.test(clean)
   ) {
-    if (!/INTEREST|FEE|BALANCE/i.test(clean)) {
+    if (!/\b(?:PREVIOUS|NEW|ENDING|BEGINNING|ACCOUNT|SUBJECT\s+TO)\s+BALANCE\b/i.test(clean)) {
       return 'PURCHASES';
     }
   }
@@ -239,16 +278,22 @@ async function parsePDFStatement(
   const allTransactions: TransactionRow[] = [];
   let globalLineCounter = 1;
   let statementYear: string | null = null;
+  let isBankAccount = false;
+  let currentSection: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'IGNORED' | 'UNKNOWN' = 'UNKNOWN';
 
-  // Pre-scan all pages for statement year
+  // Pre-scan all pages for statement year and account type
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
     const pageText = content.items.map((it: any) => it.str).join(' ');
-    const detected = detectStatementYear(pageText);
-    if (detected) {
-      statementYear = detected;
-      break;
+    if (!statementYear) {
+      const detected = detectStatementYear(pageText);
+      if (detected) {
+        statementYear = detected;
+      }
+    }
+    if (!isBankAccount && detectAccountType(pageText) === 'BANK') {
+      isBankAccount = true;
     }
   }
 
@@ -297,7 +342,6 @@ async function parsePDFStatement(
     }
 
     // 4. Parse transaction rows from reconstructed physical lines with multi-line lookahead
-    let currentSection: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'UNKNOWN' = 'UNKNOWN';
     let i = 0;
     while (i < lines.length) {
       const line = lines[i];
@@ -316,14 +360,14 @@ async function parsePDFStatement(
       }
 
       // Try extracting transaction from this specific line
-      let parsed = extractTransactionFromLine(line, fileId, file.name, globalLineCounter, group, currentSection, statementYear);
+      let parsed = extractTransactionFromLine(line, fileId, file.name, globalLineCounter, group, currentSection, statementYear, isBankAccount);
 
       // Multi-line continuation: if this line has a date but no amount, check subsequent lines for the amount
       if (!parsed && isTxDate) {
         let mergedText = text;
         const mergedItems = [...line.items];
         let nextIdx = i + 1;
-        while (nextIdx < lines.length && nextIdx <= i + 2) {
+        while (nextIdx < lines.length && nextIdx <= i + 6) {
           const nextLine = lines[nextIdx];
           if (matchUniversalDate(nextLine.fullText, statementYear) !== null) break;
           if (detectSectionHeader(nextLine.fullText) !== null || /ACCOUNT SUMMARY|PREVIOUS BALANCE/i.test(nextLine.fullText)) break;
@@ -335,7 +379,7 @@ async function parsePDFStatement(
             items: mergedItems,
             fullText: mergedText,
           };
-          parsed = extractTransactionFromLine(combinedLine, fileId, file.name, globalLineCounter, group, currentSection, statementYear);
+          parsed = extractTransactionFromLine(combinedLine, fileId, file.name, globalLineCounter, group, currentSection, statementYear, isBankAccount);
           if (parsed) {
             i = nextIdx;
             break;
@@ -465,20 +509,27 @@ function extractTransactionFromLine(
   fileName: string,
   lineNum: number,
   group: GroupType,
-  sectionHint: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'UNKNOWN',
-  contextYear?: string | null
+  sectionHint: 'PAYMENTS' | 'PURCHASES' | 'FEE' | 'IGNORED' | 'UNKNOWN',
+  contextYear?: string | null,
+  isBankAccount: boolean = false
 ): TransactionRow | null {
+  if (sectionHint === 'IGNORED') {
+    return null;
+  }
+
   const text = line.fullText;
 
   // 1. Ignore headers, footers, summary lines, warnings, and informational blocks
   if (
+    /\bTOTAL\s+(?:TRANSACTIONS|FEES?|INTEREST|PURCHASES|PAYMENTS|CREDITS|THIS\s+PERIOD|CHARGES)\b/i.test(text) ||
     /^\s*TOTAL\b|^\s*SUBTOTAL\b|\bPAGE \d+|\bACCOUNT SUMMARY\b|\bANNUAL PERCENTAGE\b|\bMINIMUM PAYMENT\b|\bDUE DATE\b|\bREWARDS BALANCE\b/i.test(text) ||
     /\bPREVIOUS BALANCE\b|\bNEW BALANCE\b|\bCREDIT LIMIT\b|\bAVAILABLE CREDIT\b|\bDELIVER TO\b|\bCARDMEMBER SERVICE\b|\bPO BOX\b|\bCAROL STREAM\b/i.test(text) ||
     /\bYEAR-TO-DATE\b|\bTOTAL FEES CHARGED\b|\bTOTAL INTEREST CHARGED\b|\bBALANCE SUBJECT TO\b|\bINTEREST CHARGES\b|\bAUTOPAY IS ON\b/i.test(text) ||
     /\bCUSTOMER SERVICE\b|\bMANAGE YOUR ACCOUNT\b|\bDOWNLOAD THE\b|\bCHASE MOBILE\b|\bLATE PAYMENT WARNING\b|\bMINIMUM PAYMENT WARNING\b/i.test(text) ||
     /\bFEE SUMMARY\b|\bPROMOTIONAL RATE\b|\bAPR FOR\b|\bPURCHASES AND ADVANCES\b|\bSTATEMENT CLOSING\b|\bAMOUNT PAST DUE\b|\bFOR INQUIRIES\b/i.test(text) ||
     /\bBILLING PERIOD\b|\bSTATEMENT PERIOD\b|^\s*ACCOUNT NUMBER\b|\bACCOUNT NUMBER:\b|\bNOTICE: SEE REVERSE\b|\bTHIS PAGE INTENTIONALLY LEFT BLANK\b/i.test(text) ||
-    /\bEXCLUSIONS APPLY\b|\bPROMO CODE\b|\bGREAT THINGS HAPPEN\b|\bIMPORTANT INFORMATION ABOUT\b/i.test(text)
+    /\bEXCLUSIONS APPLY\b|\bPROMO CODE\b|\bGREAT THINGS HAPPEN\b|\bIMPORTANT INFORMATION ABOUT\b/i.test(text) ||
+    /\b(?:EXPIRES?|EXPIRING|PROMO RATE|INTRODUCTORY RATE|DAYS IN BILLING CYCLE|VARIABLE APRS?)\b/i.test(text)
   ) {
     return null;
   }
@@ -510,17 +561,19 @@ function extractTransactionFromLine(
     remaining = remaining.slice(checkMatch[0].length).trim();
   }
 
-  // Strip long transaction reference numbers (e.g. "2402762JS1YYJA57Y", "F353100KN000BU230", "REF# 948271048")
+  // Strip US Bank ref codes (like 0000 or MTC) or general long refs
+  remaining = remaining.replace(/^(?:0000|MTC)\b\s*/i, '');
   remaining = remaining.replace(/^(?:REF\s*#?[:\s]*)?[A-Z0-9]{15,32}\b\s*/i, '').trim();
 
   // 4. Extract Amount at the end of the line
   // Supports:
   // - Standard positive / negative: $12.34, 1,234.56, -45.00, +50.00, - $45.00
+  // - Fractional dollar amounts without leading zero: .01, -.01, $.01
   // - Accounting parentheses: (12.34), ($1,000.00), ( $12.34 )
   // - Credit indicators: 45.00 CR, 100.00-, 50.00-
   // - Dual column balance output: e.g. "DEPOSIT 500.00  BALANCE 1,200.00" -> captures transaction amount
   // - OCR dollar misrecognitions: S, s, § e.g. -S146.82
-  const amountRegex = /(\(?[-+]?\s*[\$Ss§]?\s*\d{1,3}(?:,\d{3})*\.\d{2}(?:\s?CR)?-?\)?)(?:\s+[-+]?\s*[\$Ss§]?\s*\d{1,3}(?:,\d{3})*\.\d{2})?$/i;
+  const amountRegex = /(\(?[-+]?\s*[\$Ss§]?\s*(?:\d{1,3}(?:,\d{3})*|\d*)\.\d{2}(?:\s?CR)?-?\)?)(?:\s+[-+]?\s*[\$Ss§]?\s*(?:\d{1,3}(?:,\d{3})*|\d*)\.\d{2})?$/i;
   const amountMatch = remaining.match(amountRegex);
 
   if (!amountMatch) {
@@ -533,6 +586,11 @@ function extractTransactionFromLine(
 
   // Validate description is meaningful
   if (!description || description.length < 2) {
+    return null;
+  }
+
+  // Reject descriptions that are interest rate calculation rows (e.g. ") 0.00%" or containing percentages)
+  if (/\b\d{1,2}\.\d{2}%\b/.test(description) || /^[\)\(\s\%\d\.\,\-]+$/.test(description)) {
     return null;
   }
 
@@ -585,20 +643,39 @@ function extractTransactionFromLine(
   // Round to exactly 2 decimal places to prevent floating-point artifacts
   pricePaid = Math.round(pricePaid * 100) / 100;
 
-  // Determine credit vs debit vs payment
-  const isPaymentOrCreditText = /PAYMENT|CREDIT|THANK YOU|REFUND|REVERSAL|DEPOSIT|DIRECT DEP|PAYROLL|ACH CREDIT|CASHBACK|BONUS/i.test(description);
-
-  let isNegative = false;
-  if (!hasExplicitPlus) {
-    if (isCredit || sectionHint === 'PAYMENTS') {
-      isNegative = true;
-    } else if (sectionHint !== 'PURCHASES' && isPaymentOrCreditText) {
-      isNegative = true;
-    }
+  // Filter out informational $0.00 interest charges
+  if (pricePaid === 0 && /INTEREST\s+CHARGE/i.test(description)) {
+    return null;
   }
 
-  if (isNegative && pricePaid > 0) {
-    pricePaid = -pricePaid;
+  // Determine credit vs debit vs payment
+  // For Bank Accounts (Checking/Savings):
+  // - Positive amounts (without minus) are Deposits / Credits (Inflows, positive +)
+  // - Negative amounts (with minus or in Withdrawals section) are Debits / Withdrawals (Outflows, negative -)
+  // For Credit Cards:
+  // - Charges / Purchases are positive (+) additions to debt
+  // - Payments / Credits / Refunds are negative (-) reductions of debt
+  if (isBankAccount) {
+    if (isCredit || sectionHint === 'PURCHASES') {
+      pricePaid = -Math.abs(pricePaid);
+    } else {
+      pricePaid = Math.abs(pricePaid);
+    }
+  } else {
+    const isPaymentOrCreditText = /PAYMENT|CREDIT|THANK YOU|REFUND|REVERSAL|DEPOSIT|DIRECT DEP|PAYROLL|ACH CREDIT|CASHBACK|BONUS/i.test(description);
+
+    let isNegative = false;
+    if (!hasExplicitPlus) {
+      if (isCredit || sectionHint === 'PAYMENTS') {
+        isNegative = true;
+      } else if (sectionHint !== 'PURCHASES' && isPaymentOrCreditText) {
+        isNegative = true;
+      }
+    }
+
+    if (isNegative && pricePaid > 0) {
+      pricePaid = -pricePaid;
+    }
   }
 
   const pricePaidFormatted = pricePaid < 0 
@@ -606,12 +683,22 @@ function extractTransactionFromLine(
     : `$${pricePaid.toFixed(2)}`;
 
   let txType: TransactionType = 'PURCHASE';
-  if (pricePaid < 0 || sectionHint === 'PAYMENTS') {
-    txType = 'CREDIT';
-  } else if (/INTEREST CHARGE|FINANCE CHARGE/i.test(description)) {
-    txType = 'INTEREST';
-  } else if (/FEE|SURCHARGE|LATE CHARGE|OVERDRAFT|ANNUAL FEE/i.test(description) || sectionHint === 'FEE') {
-    txType = 'FEE';
+  if (isBankAccount) {
+    if (pricePaid >= 0) {
+      txType = 'CREDIT';
+    } else if (/FEE|SURCHARGE|SERVICE FEE|MONTHLY FEE/i.test(description) || sectionHint === 'FEE') {
+      txType = 'FEE';
+    } else {
+      txType = 'PURCHASE';
+    }
+  } else {
+    if (pricePaid < 0 || sectionHint === 'PAYMENTS') {
+      txType = 'CREDIT';
+    } else if (/INTEREST CHARGE|FINANCE CHARGE/i.test(description)) {
+      txType = 'INTEREST';
+    } else if (/FEE|SURCHARGE|LATE CHARGE|OVERDRAFT|ANNUAL FEE/i.test(description) || sectionHint === 'FEE') {
+      txType = 'FEE';
+    }
   }
 
   return {
@@ -712,6 +799,7 @@ function cleanDescription(desc: string): string {
   return desc
     .replace(/^[\*\:\-\#~=_•\|\s]+/, '')
     .replace(/[\*\:\-\#~=_•\|\s]+$/, '')
+    .replace(/(?:\s+Merchandise)?$/i, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
