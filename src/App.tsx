@@ -100,6 +100,8 @@ export function App() {
     setSavedSheets([]);
     setFiles([]);
     setTransactions([]);
+    setIsHistoryModalOpen(false);
+    setIsSheetsManagerOpen(false);
   };
 
   // Handle successful authentication

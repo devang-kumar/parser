@@ -1,9 +1,19 @@
 import type { TransactionRow, ImportSession, SessionFileSummary } from '../types';
 import { authService } from './authService';
 
-const LOCAL_STORAGE_SESSIONS_KEY = 'statement_import_sessions';
+const LEGACY_STORAGE_KEY = 'statement_import_sessions';
 
 class HistoryService {
+  /**
+   * Scopes the storage key to the currently logged in user ID so that
+   * different accounts never see or share each other's sessions.
+   */
+  private getStorageKey(): string {
+    const session = authService.getCurrentSession();
+    const userId = session?.user?.id;
+    return userId ? `statement_import_sessions_${userId}` : 'statement_import_sessions_guest';
+  }
+
   private getHeaders() {
     const session = authService.getCurrentSession();
     const token = session ? session.token : null;
@@ -15,10 +25,20 @@ class HistoryService {
 
   private getLocalSessions(): ImportSession[] {
     try {
-      const raw = localStorage.getItem(LOCAL_STORAGE_SESSIONS_KEY);
+      // Clean up legacy unscoped key so it NEVER leaks between accounts
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+
+      const key = this.getStorageKey();
+      const raw = localStorage.getItem(key);
       if (!raw) return [];
       const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
+      if (!Array.isArray(parsed)) return [];
+
+      const currentUserId = authService.getCurrentSession()?.user?.id;
+      return parsed.filter((s: any) => {
+        if (!currentUserId) return !s.userId || s.userId === 'guest';
+        return s.userId === currentUserId || !s.userId;
+      });
     } catch {
       return [];
     }
@@ -26,7 +46,8 @@ class HistoryService {
 
   private saveLocalSessions(sessions: ImportSession[]) {
     try {
-      localStorage.setItem(LOCAL_STORAGE_SESSIONS_KEY, JSON.stringify(sessions.slice(0, 50)));
+      const key = this.getStorageKey();
+      localStorage.setItem(key, JSON.stringify(sessions.slice(0, 50)));
     } catch (e) {
       console.warn('Failed to save sessions to localStorage', e);
     }
@@ -43,96 +64,42 @@ class HistoryService {
   }
 
   /**
-   * Retrieves all saved import sessions (merging cloud & localStorage without duplicates)
+   * Retrieves all saved import sessions strictly for the active account
    */
   async getSessions(): Promise<ImportSession[]> {
+    const session = authService.getCurrentSession();
+    const currentUserId = session?.user?.id;
     const local = this.getLocalSessions();
-    let remote: ImportSession[] = [];
 
-    try {
-      const session = authService.getCurrentSession();
-      if (session?.token) {
+    // 1. If authenticated, cloud MongoDB is the single source of truth for this user account
+    if (session?.token && currentUserId) {
+      try {
         const res = await fetch('/api/history', { headers: this.getHeaders() });
         const data = await res.json();
         if (data.success && Array.isArray(data.data)) {
-          remote = data.data;
+          const remoteSessions: ImportSession[] = data.data.map((item: any) => ({
+            ...item,
+            userId: currentUserId,
+          }));
+
+          // Cache this user's cloud sessions into their scoped localStorage key
+          this.saveLocalSessions(remoteSessions);
+          return remoteSessions.sort(
+            (a, b) => new Date(b.uploadDate || b.createdAt || 0).getTime() - new Date(a.uploadDate || a.createdAt || 0).getTime()
+          );
         }
+      } catch (e) {
+        console.warn('Backend session fetch failed, falling back to account local cache', e);
       }
-    } catch (e) {
-      console.warn('Backend session fetch skipped or failed, using local storage', e);
+
+      // If backend was unreachable, return this specific user's cached sessions only
+      return local.sort(
+        (a, b) => new Date(b.uploadDate || b.createdAt || 0).getTime() - new Date(a.uploadDate || a.createdAt || 0).getTime()
+      );
     }
 
-    // Helper to determine if two session objects represent the same import session
-    const isDuplicate = (a: ImportSession, b: ImportSession): boolean => {
-      if (a.id && b.id && a.id === b.id) return true;
-
-      const nameA = (a.name || a.fileName || '').trim().toLowerCase();
-      const nameB = (b.name || b.fileName || '').trim().toLowerCase();
-      const countA = a.transactionCount || a.transactions?.length || 0;
-      const countB = b.transactionCount || b.transactions?.length || 0;
-
-      if (countA > 0 && countA === countB) {
-        // Compare first transaction if present
-        const txA = a.transactions?.[0];
-        const txB = b.transactions?.[0];
-        if (txA && txB) {
-          if (
-            txA.date === txB.date &&
-            ((txA as any).description || txA.chargeInformation) === ((txB as any).description || txB.chargeInformation) &&
-            Math.abs((txA.pricePaid || 0) - (txB.pricePaid || 0)) < 0.01
-          ) {
-            return true;
-          }
-        }
-
-        // Compare amounts & names
-        const amtA = Math.round((a.totalAmount || 0) * 100);
-        const amtB = Math.round((b.totalAmount || 0) * 100);
-        if (amtA === amtB && nameA === nameB) {
-          return true;
-        }
-
-        // Compare timestamps within 15 minutes and matching names
-        const timeA = new Date(a.uploadDate || a.createdAt || 0).getTime();
-        const timeB = new Date(b.uploadDate || b.createdAt || 0).getTime();
-        if (Math.abs(timeA - timeB) < 15 * 60 * 1000 && nameA === nameB) {
-          return true;
-        }
-      }
-
-      return false;
-    };
-
-    let uniqueSessions: ImportSession[] = [];
-
-    if (remote.length > 0) {
-      // Remote cloud sessions are the authoritative source of truth for logged-in accounts
-      uniqueSessions = [...remote];
-
-      // Keep only local sessions that do not already exist on the server (e.g. offline/guest)
-      const remainingLocal: ImportSession[] = [];
-      for (const loc of local) {
-        const alreadyInRemote = remote.some((rem) => isDuplicate(loc, rem));
-        if (!alreadyInRemote) {
-          remainingLocal.push(loc);
-          uniqueSessions.push(loc);
-        }
-      }
-
-      // Automatically purge the duplicate local sessions so localStorage stays clean
-      if (remainingLocal.length !== local.length) {
-        this.saveLocalSessions(uniqueSessions);
-      }
-    } else {
-      // Offline / guest mode: deduplicate local list
-      for (const loc of local) {
-        if (!uniqueSessions.some((existing) => isDuplicate(existing, loc))) {
-          uniqueSessions.push(loc);
-        }
-      }
-    }
-
-    return uniqueSessions.sort(
+    // 2. Guest / unauthenticated mode: only return guest sessions
+    return local.sort(
       (a, b) => new Date(b.uploadDate || b.createdAt || 0).getTime() - new Date(a.uploadDate || a.createdAt || 0).getTime()
     );
   }
@@ -158,10 +125,11 @@ class HistoryService {
     }, 0);
     const sessionName = sessionData.name || this.generateSessionName(sessionData.files);
     const tempId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    const currentUserId = authService.getCurrentSession()?.user?.id || 'guest';
 
     const newSession: ImportSession = {
       id: tempId,
-      userId: authService.getCurrentSession()?.user?.id || 'guest',
+      userId: currentUserId,
       name: sessionName,
       fileName: sessionName,
       uploadDate: new Date().toISOString(),
@@ -174,7 +142,7 @@ class HistoryService {
       sheetUrl: sessionData.sheetUrl,
     };
 
-    // 1. Immediately persist to localStorage for instant UI response
+    // 1. Immediately persist to current user's local cache
     const local = this.getLocalSessions();
     this.saveLocalSessions([newSession, ...local]);
 
@@ -256,7 +224,7 @@ class HistoryService {
   }
 
   /**
-   * Clears all sessions
+   * Clears all sessions for the active user account
    */
   async clearAllSessions(): Promise<boolean> {
     this.saveLocalSessions([]);
@@ -295,5 +263,3 @@ class HistoryService {
 }
 
 export const historyService = new HistoryService();
-
-
