@@ -351,7 +351,10 @@ export async function syncToMasterSheet(
       );
 
       if (!writeRes.ok) {
-        const err = await writeRes.json();
+        const err = await writeRes.json().catch(() => null);
+        if (writeRes.status === 404 || err?.error?.code === 404 || err?.error?.status === 'NOT_FOUND') {
+          throw new Error('Google Spreadsheet not found (404). Please click "Target Sheet" and enter a valid Google Sheet link.');
+        }
         throw new Error(err?.error?.message || 'Failed to write rows to sheet');
       }
     } else {
@@ -367,8 +370,11 @@ export async function syncToMasterSheet(
         if (colRes.ok) {
           const colData = await colRes.json();
           existingRowCount = colData.values ? colData.values.length : 0;
+        } else if (colRes.status === 404) {
+          throw new Error('Google Spreadsheet not found (404). Please click "Target Sheet" and enter a valid Google Sheet link.');
         }
-      } catch (err) {
+      } catch (err: any) {
+        if (err?.message?.includes('404')) throw err;
         console.warn('Could not inspect existing row count:', err);
       }
 
@@ -398,7 +404,10 @@ export async function syncToMasterSheet(
       );
 
       if (!writeRes.ok) {
-        const err = await writeRes.json();
+        const err = await writeRes.json().catch(() => null);
+        if (writeRes.status === 404 || err?.error?.code === 404 || err?.error?.status === 'NOT_FOUND') {
+          throw new Error('Google Spreadsheet not found (404). Please click "Target Sheet" and enter a valid Google Sheet link.');
+        }
         throw new Error(err?.error?.message || 'Failed to append rows to sheet');
       }
     }

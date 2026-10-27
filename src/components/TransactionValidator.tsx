@@ -119,9 +119,11 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
   const targetSheet = savedSheets[0];
   const hasValidTargetSheet = Boolean(
     targetSheet &&
+      !targetSheet.url?.includes('VITE_') &&
+      !targetSheet.spreadsheetId?.startsWith('VITE_') &&
       ((targetSheet.url && targetSheet.url.includes('/d/')) ||
         (targetSheet.spreadsheetId &&
-          targetSheet.spreadsheetId.length > 15 &&
+          targetSheet.spreadsheetId.length >= 25 &&
           !targetSheet.spreadsheetId.startsWith('config-')))
   );
 

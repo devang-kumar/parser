@@ -29,11 +29,14 @@ export const SavedSheetsManager: React.FC<SavedSheetsManagerProps> = ({
     }
 
     // Extract spreadsheet ID if full URL
-    const idMatch = trimmed.match(/\/d\/([a-zA-Z0-9-_]+)/);
+    const idMatch = trimmed.match(/\/d\/([a-zA-Z0-9-_]{20,})/);
     const spreadsheetId = idMatch ? idMatch[1] : trimmed;
 
-    if (spreadsheetId.length < 15) {
-      setErrorMsg('The provided link does not appear to contain a valid Google Spreadsheet ID.');
+    if (
+      trimmed.startsWith('VITE_') ||
+      (!idMatch && !/^[a-zA-Z0-9-_]{25,65}$/.test(spreadsheetId))
+    ) {
+      setErrorMsg('Please enter a valid Google Sheet URL (e.g. https://docs.google.com/spreadsheets/d/.../edit).');
       return;
     }
 
