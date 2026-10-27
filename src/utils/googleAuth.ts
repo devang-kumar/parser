@@ -355,6 +355,10 @@ export async function syncToMasterSheet(
         if (writeRes.status === 404 || err?.error?.code === 404 || err?.error?.status === 'NOT_FOUND') {
           throw new Error('Google Spreadsheet not found (404). Please click "Target Sheet" and enter a valid Google Sheet link.');
         }
+        if (writeRes.status === 403 || err?.error?.code === 403 || err?.error?.status === 'PERMISSION_DENIED') {
+          disconnectGoogleAccount();
+          throw new Error('Google Permission Denied (403): Your connected Google Account cannot edit this spreadsheet. Please: 1) Open the sheet in Google Drive, click Share (top-right), and set General access to "Anyone with the link can edit" (or add your Google email as Editor). 2) Click "Sync & Replace Sheet" again to re-authorize.');
+        }
         throw new Error(err?.error?.message || 'Failed to write rows to sheet');
       }
     } else {
@@ -372,9 +376,12 @@ export async function syncToMasterSheet(
           existingRowCount = colData.values ? colData.values.length : 0;
         } else if (colRes.status === 404) {
           throw new Error('Google Spreadsheet not found (404). Please click "Target Sheet" and enter a valid Google Sheet link.');
+        } else if (colRes.status === 403) {
+          disconnectGoogleAccount();
+          throw new Error('Google Permission Denied (403): Your connected Google Account cannot edit this spreadsheet. Please: 1) Open the sheet in Google Drive, click Share (top-right), and set General access to "Anyone with the link can edit" (or add your Google email as Editor). 2) Click "Sync & Replace Sheet" again to re-authorize.');
         }
       } catch (err: any) {
-        if (err?.message?.includes('404')) throw err;
+        if (err?.message?.includes('404') || err?.message?.includes('403')) throw err;
         console.warn('Could not inspect existing row count:', err);
       }
 
@@ -407,6 +414,10 @@ export async function syncToMasterSheet(
         const err = await writeRes.json().catch(() => null);
         if (writeRes.status === 404 || err?.error?.code === 404 || err?.error?.status === 'NOT_FOUND') {
           throw new Error('Google Spreadsheet not found (404). Please click "Target Sheet" and enter a valid Google Sheet link.');
+        }
+        if (writeRes.status === 403 || err?.error?.code === 403 || err?.error?.status === 'PERMISSION_DENIED') {
+          disconnectGoogleAccount();
+          throw new Error('Google Permission Denied (403): Your connected Google Account cannot edit this spreadsheet. Please: 1) Open the sheet in Google Drive, click Share (top-right), and set General access to "Anyone with the link can edit" (or add your Google email as Editor). 2) Click "Sync & Replace Sheet" again to re-authorize.');
         }
         throw new Error(err?.error?.message || 'Failed to append rows to sheet');
       }
