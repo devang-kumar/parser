@@ -68,6 +68,7 @@ export function disconnectGoogleAccount(): void {
   localStorage.removeItem(GOOGLE_EMAIL_KEY);
   localStorage.removeItem(GOOGLE_NAME_KEY);
   localStorage.removeItem(GOOGLE_PICTURE_KEY);
+  localStorage.removeItem(PERSISTENT_SHEET_ID_KEY);
 }
 
 /**
@@ -227,14 +228,13 @@ export async function getValidAccessToken(): Promise<string> {
 export async function syncToMasterSheet(
   transactions: TransactionRow[],
   targetSpreadsheetIdOrUrl?: string,
-  tabName: string = 'Transactions'
+  tabName: string = 'Transactions',
+  mode: 'append' | 'overwrite' = 'append'
 ): Promise<{ success: boolean; spreadsheetUrl?: string; message: string; rowsAdded?: number }> {
   try {
     const token = await getValidAccessToken();
 
     // 1. Determine spreadsheet ID:
-    // Priority 1: User explicitly provided URL/ID
-    // Priority 2: Stored Master Sheet ID from previous sync
     let spreadsheetId: string | null = null;
 
     if (targetSpreadsheetIdOrUrl && targetSpreadsheetIdOrUrl.trim()) {
@@ -286,26 +286,8 @@ export async function syncToMasterSheet(
       if (spreadsheetId) {
         localStorage.setItem(PERSISTENT_SHEET_ID_KEY, spreadsheetId);
       }
-
-      // Add Headers to new sheet
-      await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A1:append?valueInputOption=USER_ENTERED`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            range: `${sheetTab}!A1`,
-            majorDimension: 'ROWS',
-            values: [['Date', 'Price Paid', 'Charge Information', 'Imported At']],
-          }),
-        }
-      );
     } else {
-      // If attaching to an existing spreadsheet:
-      // Verify and resolve the sheet tab name to avoid "Unable to parse range" error
+      // If attaching to an existing spreadsheet, verify and resolve the sheet tab name
       try {
         const metaRes = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties.title`,
@@ -319,7 +301,6 @@ export async function syncToMasterSheet(
           const metaData = await metaRes.json();
           const titles: string[] = (metaData.sheets || []).map((s: any) => s.properties.title);
           if (!titles.includes(sheetTab) && titles.length > 0) {
-            // Tab does not exist; use the first tab from the user's existing spreadsheet
             sheetTab = titles[0];
           }
         }
@@ -328,7 +309,7 @@ export async function syncToMasterSheet(
       }
     }
 
-    // 3. Format rows with the separation field for Timestamp
+    // 3. Format rows strictly for Columns A to D
     const rows = transactions.map((t) => [
       t.date,
       t.pricePaid,
@@ -336,51 +317,90 @@ export async function syncToMasterSheet(
       currentTimestamp,
     ]);
 
-    // Check if the target sheet tab is completely empty to add header row
-    let rowsToAppend = rows;
-    try {
-      const checkRes = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A1:D1`,
+    const header = ['Date', 'Price Paid', 'Charge Information', 'Imported At'];
+
+    if (mode === 'overwrite') {
+      // Clear columns A:Z to eliminate any previous displaced columns (e.g. column P commas)
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A:Z:clear`,
         {
+          method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
           },
         }
-      );
-      if (checkRes.ok) {
-        const checkData = await checkRes.json();
-        if (!checkData.values || checkData.values.length === 0) {
-          rowsToAppend = [['Date', 'Price Paid', 'Charge Information', 'Imported At'], ...rows];
+      ).catch(() => {});
+
+      // Write fresh header + rows strictly in A1:D...
+      const allRows = [header, ...rows];
+      const writeRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A1:D${allRows.length}?valueInputOption=USER_ENTERED`,
+        {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            range: `${sheetTab}!A1:D${allRows.length}`,
+            majorDimension: 'ROWS',
+            values: allRows,
+          }),
         }
-      }
-    } catch {
-      // If check fails, proceed with standard append
-    }
+      );
 
-    // 4. Append transactions to the persistent master sheet
-    const appendRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A1:append?valueInputOption=USER_ENTERED`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          range: `${sheetTab}!A1`,
-          majorDimension: 'ROWS',
-          values: rowsToAppend,
-        }),
+      if (!writeRes.ok) {
+        const err = await writeRes.json();
+        throw new Error(err?.error?.message || 'Failed to write rows to sheet');
       }
-    );
+    } else {
+      // Append mode: strictly inspect column A row count to avoid drifting into column P
+      let existingRowCount = 0;
+      try {
+        const colRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A:A`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+        if (colRes.ok) {
+          const colData = await colRes.json();
+          existingRowCount = colData.values ? colData.values.length : 0;
+        }
+      } catch (err) {
+        console.warn('Could not inspect existing row count:', err);
+      }
 
-    if (!appendRes.ok) {
-      const err = await appendRes.json();
-      // If sheet ID was stale or deleted, clear cached ID so next click recreates cleanly
-      if (err?.error?.code === 404) {
-        localStorage.removeItem(PERSISTENT_SHEET_ID_KEY);
+      let startRow = existingRowCount + 1;
+      let valuesToWrite = rows;
+      if (existingRowCount === 0) {
+        valuesToWrite = [header, ...rows];
       }
-      throw new Error(err?.error?.message || 'Failed to append rows to master sheet');
+
+      const endRow = startRow + valuesToWrite.length - 1;
+      const targetRange = `${sheetTab}!A${startRow}:D${endRow}`;
+
+      const writeRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A${startRow}:D${endRow}?valueInputOption=USER_ENTERED`,
+        {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            range: targetRange,
+            majorDimension: 'ROWS',
+            values: valuesToWrite,
+          }),
+        }
+      );
+
+      if (!writeRes.ok) {
+        const err = await writeRes.json();
+        throw new Error(err?.error?.message || 'Failed to append rows to sheet');
+      }
     }
 
     const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
@@ -401,14 +421,15 @@ export async function syncToMasterSheet(
 }
 
 /**
- * Sync to an existing Google Spreadsheet by ID or Link (legacy helper)
+ * Sync to an existing Google Spreadsheet by ID or Link
  */
 export async function syncToExistingSheet(
   spreadsheetIdOrUrl: string,
   tabName: string,
-  transactions: TransactionRow[]
+  transactions: TransactionRow[],
+  mode: 'append' | 'overwrite' = 'append'
 ): Promise<{ success: boolean; message: string; rowsAdded?: number; spreadsheetUrl?: string }> {
-  return syncToMasterSheet(transactions, spreadsheetIdOrUrl, tabName);
+  return syncToMasterSheet(transactions, spreadsheetIdOrUrl, tabName, mode);
 }
 
 /**

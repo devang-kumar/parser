@@ -261,4 +261,39 @@ router.put('/users/:id/role', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+// User: Get personal saved sheets
+router.get('/sheets', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('savedSheets');
+    res.json({ success: true, sheets: user?.savedSheets || [] });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// User: Save personal sheets
+router.post('/sheets', requireAuth, async (req, res) => {
+  try {
+    const { sheets } = req.body;
+    await User.findByIdAndUpdate(req.user.id, { $set: { savedSheets: sheets || [] } });
+    res.json({ success: true, message: 'Sheets saved successfully' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// User: Remove personal sheet
+router.delete('/sheets/:id', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (user) {
+      user.savedSheets = (user.savedSheets || []).filter(s => s.id !== req.params.id);
+      await user.save();
+    }
+    res.json({ success: true, message: 'Sheet removed' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 export default router;

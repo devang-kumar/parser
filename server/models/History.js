@@ -36,6 +36,15 @@ const HistorySchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  totalAmount: {
+    type: Number,
+    default: 0,
+  },
+  files: [{
+    name: String,
+    size: Number,
+    transactionCount: Number,
+  }],
   transactions: [TransactionSchema],
 }, { timestamps: true });
 

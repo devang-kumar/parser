@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, FileText, CheckCircle2, AlertCircle, Loader2, Play, Trash2 } from 'lucide-react';
+import { UploadCloud, FileText, CheckCircle2, AlertCircle, Loader2, Play, Trash2, Clock } from 'lucide-react';
 import type { StatementFile } from '../types';
 
 interface StatementUploaderProps {
@@ -8,6 +8,7 @@ interface StatementUploaderProps {
   onProcessFiles: () => void;
   onRemoveFile: (id: string) => void;
   isProcessing: boolean;
+  onOpenHistory?: () => void;
 }
 
 export const StatementUploader: React.FC<StatementUploaderProps> = ({
@@ -16,6 +17,7 @@ export const StatementUploader: React.FC<StatementUploaderProps> = ({
   onProcessFiles,
   onRemoveFile,
   isProcessing,
+  onOpenHistory,
 }) => {
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -40,16 +42,29 @@ export const StatementUploader: React.FC<StatementUploaderProps> = ({
   return (
     <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-5">
       
-      {/* Title */}
-      <div className="pb-3.5 border-b border-slate-100">
-        <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-          <UploadCloud className="h-5 w-5 text-blue-600" />
-          Upload Bank Statements
-        </h2>
-        <p className="text-xs text-slate-500 mt-1">
-          Securely parse your PDF, Image, or CSV bank statements. Drag and drop files below.
-        </p>
+      {/* Title & History Access */}
+      <div className="pb-3.5 border-b border-slate-100 flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+            <UploadCloud className="h-5 w-5 text-blue-600" />
+            Upload Bank Statements
+          </h2>
+          <p className="text-xs text-slate-500 mt-1">
+            Securely parse your PDF, Image, or CSV bank statements. Drag and drop files below.
+          </p>
+        </div>
+        {onOpenHistory && (
+          <button
+            onClick={onOpenHistory}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl border border-slate-200 text-xs font-semibold transition-all cursor-pointer shadow-2xs shrink-0"
+            title="View & restore past import sessions"
+          >
+            <Clock className="h-3.5 w-3.5 text-blue-600" />
+            <span>History</span>
+          </button>
+        )}
       </div>
+
 
       {/* Drag & Drop Upload Zone */}
       <div

@@ -35,6 +35,14 @@ const UserSchema = new mongoose.Schema({
   lastLogin: {
     type: Date,
   },
+  savedSheets: [{
+    id: String,
+    title: String,
+    url: String,
+    spreadsheetId: String,
+    tabName: String,
+    createdAt: String,
+  }],
 }, { timestamps: true });
 
 export default mongoose.model('User', UserSchema);

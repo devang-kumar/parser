@@ -17,9 +17,11 @@ import type {
   UploadHistoryItem
 } from './types';
 import { parseStatementFile } from './utils/pdfParser';
+import { disconnectGoogleAccount } from './utils/googleAuth';
 import { FileSpreadsheet } from 'lucide-react';
 
-const LOCAL_STORAGE_SHEETS_KEY = 'statement_importer_saved_sheets';
+const getUserSheetsKey = (userId?: string | null) =>
+  userId ? `statement_importer_saved_sheets_${userId}` : 'statement_importer_saved_sheets_guest';
 
 export function App() {
   // Auth state
@@ -37,20 +39,65 @@ export function App() {
   const [files, setFiles] = useState<StatementFile[]>([]);
   const [transactions, setTransactions] = useState<TransactionRow[]>([]);
   const [savedSheets, setSavedSheets] = useState<SavedSpreadsheet[]>(() => {
-    const cached = localStorage.getItem(LOCAL_STORAGE_SHEETS_KEY);
-    return cached ? JSON.parse(cached) : [];
+    // Clean up legacy unscoped key so it doesn't leak between accounts
+    try {
+      localStorage.removeItem('statement_importer_saved_sheets');
+    } catch {}
+
+    const session = authService.getCurrentSession();
+    if (!session?.user?.id) return [];
+    try {
+      const cached = localStorage.getItem(getUserSheetsKey(session.user.id));
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
   });
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // Sync savedSheets to localStorage
+  // Sync sheets strictly per user account
   useEffect(() => {
-    localStorage.setItem(LOCAL_STORAGE_SHEETS_KEY, JSON.stringify(savedSheets));
-  }, [savedSheets]);
+    try {
+      localStorage.removeItem('statement_importer_saved_sheets');
+    } catch {}
+
+    if (!currentUser) {
+      setSavedSheets([]);
+      return;
+    }
+
+    const loadUserSheets = async () => {
+      const userKey = getUserSheetsKey(currentUser.id);
+      const cached = localStorage.getItem(userKey);
+      if (cached) {
+        try {
+          setSavedSheets(JSON.parse(cached));
+        } catch {}
+      } else {
+        setSavedSheets([]);
+      }
+
+      // Fetch from remote database for this user
+      try {
+        const remoteSheets = await authService.getUserSheets();
+        if (Array.isArray(remoteSheets)) {
+          setSavedSheets(remoteSheets);
+          localStorage.setItem(userKey, JSON.stringify(remoteSheets));
+        }
+      } catch (err) {
+        console.warn('Failed to fetch remote user sheets', err);
+      }
+    };
+
+    loadUserSheets();
+  }, [currentUser?.id]);
 
   // Handle logout
   const handleLogout = () => {
     authService.logout();
+    disconnectGoogleAccount();
     setCurrentUser(null);
+    setSavedSheets([]);
     setFiles([]);
     setTransactions([]);
   };
@@ -107,10 +154,6 @@ export function App() {
           fileItem.transactions = parsedRows;
           newTransactions = [...newTransactions, ...parsedRows];
 
-          if (currentUser) {
-            historyService.saveUpload(fileItem.name, parsedRows);
-          }
-
         } catch (err: any) {
           fileItem.status = 'error';
           fileItem.errorMessage = err.message || 'Failed to parse statement file';
@@ -122,6 +165,19 @@ export function App() {
 
     if (newTransactions.length > 0) {
       setTransactions((prev) => [...prev, ...newTransactions]);
+
+      // Save the entire import session with all its files & transactions combined
+      const completedFiles = updatedFiles.filter((f) => f.status === 'completed' && f.transactionCount > 0);
+      if (completedFiles.length > 0) {
+        historyService.saveSession({
+          files: completedFiles.map((f) => ({
+            name: f.name,
+            size: f.size,
+            transactionCount: f.transactionCount,
+          })),
+          transactions: newTransactions,
+        });
+      }
     }
     
     setIsProcessing(false);
@@ -151,27 +207,60 @@ export function App() {
     setFiles([]);
   };
 
-  // Sheets Manager handlers
+  // Sheets Manager handlers - strictly scoped to current user account
   const handleAddSheet = (sheet: SavedSpreadsheet) => {
-    setSavedSheets([sheet]);
+    const updated = [sheet];
+    setSavedSheets(updated);
+    if (currentUser?.id) {
+      try {
+        localStorage.setItem(getUserSheetsKey(currentUser.id), JSON.stringify(updated));
+      } catch {}
+      authService.saveUserSheets(updated);
+    }
   };
 
   const handleDeleteSheet = (id: string) => {
-    setSavedSheets((prev) => prev.filter((s) => s.id !== id));
+    const updated = savedSheets.filter((s) => s.id !== id);
+    setSavedSheets(updated);
+    if (currentUser?.id) {
+      try {
+        localStorage.setItem(getUserSheetsKey(currentUser.id), JSON.stringify(updated));
+      } catch {}
+      authService.deleteUserSheet(id);
+    }
   };
 
-  const handleLoadHistory = (item: UploadHistoryItem) => {
-    setTransactions(item.transactions);
-    setFiles([{
-      id: `history-${item.id}`,
-      name: item.fileName,
-      size: 0,
-      uploadTime: new Date().toLocaleTimeString(),
-      status: 'completed',
-      progress: 100,
-      transactionCount: item.transactionCount,
-      transactions: item.transactions,
-    }]);
+  const handleLoadHistory = (session: UploadHistoryItem) => {
+    // 1. Restore all combined transactions from this session
+    setTransactions(session.transactions || []);
+
+    // 2. Restore all files associated with this session into the statement queue
+    const sessionFiles: StatementFile[] =
+      session.files && session.files.length > 0
+        ? session.files.map((sf, idx) => ({
+            id: `file-session-${session.id}-${idx}`,
+            name: sf.name,
+            size: sf.size || 0,
+            uploadTime: new Date(session.uploadDate || Date.now()).toLocaleTimeString(),
+            status: 'completed',
+            progress: 100,
+            transactionCount: sf.transactionCount,
+            transactions: (session.transactions || []).filter((t) => t.fileName === sf.name),
+          }))
+        : [
+            {
+              id: `file-session-${session.id}`,
+              name: session.name || session.fileName || 'Import Session',
+              size: 0,
+              uploadTime: new Date(session.uploadDate || Date.now()).toLocaleTimeString(),
+              status: 'completed',
+              progress: 100,
+              transactionCount: session.transactionCount,
+              transactions: session.transactions || [],
+            },
+          ];
+
+    setFiles(sessionFiles);
   };
 
   return (
@@ -214,6 +303,7 @@ export function App() {
             onProcessFiles={handleProcessFiles}
             onRemoveFile={handleRemoveFile}
             isProcessing={isProcessing}
+            onOpenHistory={() => setIsHistoryModalOpen(true)}
           />
 
           {transactions.length > 0 && (
@@ -224,6 +314,7 @@ export function App() {
               onDeleteTransaction={handleDeleteTransaction}
               onClearAll={handleClearAll}
               onOpenSheetsManager={() => setIsSheetsManagerOpen(true)}
+              onOpenHistory={() => setIsHistoryModalOpen(true)}
             />
           )}
         </div>
@@ -232,7 +323,7 @@ export function App() {
 
       {/* Modals & Overlays */}
       
-      {isSheetsManagerOpen && currentUser && (
+      {isSheetsManagerOpen && (
         <SavedSheetsManager
           sheets={savedSheets}
           onAddSheet={handleAddSheet}
@@ -241,7 +332,7 @@ export function App() {
         />
       )}
 
-      {isHistoryModalOpen && currentUser && (
+      {isHistoryModalOpen && (
         <UploadHistoryModal
           currentUser={currentUser}
           onClose={() => setIsHistoryModalOpen(false)}

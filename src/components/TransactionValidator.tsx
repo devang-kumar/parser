@@ -23,11 +23,7 @@ import {
   syncToGoogleSheetsWebhook,
 } from '../utils/sheetsSync';
 import {
-  syncToMasterSheet,
   syncToExistingSheet,
-  isGoogleConnected,
-  getConnectedGoogleAccount,
-  getMasterSheetId,
 } from '../utils/googleAuth';
 
 interface TransactionValidatorProps {
@@ -37,6 +33,7 @@ interface TransactionValidatorProps {
   onDeleteTransaction: (id: string) => void;
   onClearAll: () => void;
   onOpenSheetsManager?: () => void;
+  onOpenHistory?: () => void;
 }
 
 export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
@@ -46,6 +43,7 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
   onDeleteTransaction,
   onClearAll,
   onOpenSheetsManager,
+  onOpenHistory,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [auditRowId, setAuditRowId] = useState<string | null>(null);
@@ -57,7 +55,7 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
   const [syncStatus, setSyncStatus] = useState<{ loading: boolean; message?: string; isError?: boolean }>({
     loading: false,
   });
-  const [showDestinationModal, setShowDestinationModal] = useState(false);
+  const [syncMode, setSyncMode] = useState<'overwrite' | 'append'>('overwrite');
   const [lastSheetUrl, setLastSheetUrl] = useState<string | null>(null);
 
   // Filter transactions
@@ -69,7 +67,25 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
     );
   });
 
-  const totalAmount = transactions.reduce((sum, t) => sum + t.pricePaid, 0);
+  // Separate debits (charges) and credits (payments / refunds)
+  const isRowCredit = (t: TransactionRow) =>
+    t.pricePaid < 0 ||
+    t.type === 'CREDIT' ||
+    t.type === 'PAYMENT' ||
+    (t.pricePaidFormatted && t.pricePaidFormatted.includes('-'));
+
+  const totalCharges = filtered.reduce(
+    (sum, t) => sum + (!isRowCredit(t) ? Math.abs(t.pricePaid) : 0),
+    0
+  );
+
+  const totalCredits = filtered.reduce(
+    (sum, t) => sum + (isRowCredit(t) ? Math.abs(t.pricePaid) : 0),
+    0
+  );
+
+  const netTotal = totalCharges - totalCredits;
+  const totalAmount = netTotal;
 
   const startEdit = (row: TransactionRow) => {
     setEditingId(row.id);
@@ -111,31 +127,22 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
           !targetSheet.spreadsheetId.startsWith('config-')))
   );
 
-  const isGoogleLinked = isGoogleConnected() || Boolean(getMasterSheetId());
-  const connectedAccount = getConnectedGoogleAccount();
-
-  const executeSync = async (mode: 'target' | 'master') => {
-    setShowDestinationModal(false);
-    if (filtered.length === 0) return;
+  const executeSync = async () => {
+    if (filtered.length === 0 || !targetSheet) return;
 
     setSyncStatus({
       loading: true,
-      message: mode === 'target' ? 'Syncing to Target Sheet...' : 'Syncing to Google Master Sheet...',
+      message: 'Syncing to your Google Sheet...',
     });
     setLastSheetUrl(null);
 
     try {
-      let res;
-      if (mode === 'target' && targetSheet) {
-        res = await syncToExistingSheet(
-          targetSheet.url || targetSheet.spreadsheetId,
-          targetSheet.tabName || 'Sheet1',
-          filtered
-        );
-      } else {
-        // Master Sheet in user's Drive
-        res = await syncToMasterSheet(filtered, undefined, 'Transactions');
-      }
+      const res = await syncToExistingSheet(
+        targetSheet.url || targetSheet.spreadsheetId,
+        targetSheet.tabName || 'Sheet1',
+        filtered,
+        syncMode
+      );
 
       if (res.success) {
         if (res.spreadsheetUrl) setLastSheetUrl(res.spreadsheetUrl);
@@ -146,11 +153,11 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
         });
       } else {
         // Fallback: If webhook is configured on target sheet, attempt webhook
-        if (mode === 'target' && targetSheet?.webhookUrl) {
+        if (targetSheet?.webhookUrl) {
           const webhookRes = await syncToGoogleSheetsWebhook(
             targetSheet.webhookUrl,
             targetSheet.spreadsheetId,
-            targetSheet.tabName,
+            targetSheet.tabName || 'Sheet1',
             filtered
           );
           setSyncStatus({
@@ -178,20 +185,15 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
   const handleInitiateSync = () => {
     if (filtered.length === 0) return;
 
-    // If BOTH target sheet and Google account linking are available:
-    if (hasValidTargetSheet && isGoogleLinked) {
-      setShowDestinationModal(true);
+    // If no target sheet configured, prompt the user to paste their sheet link
+    if (!hasValidTargetSheet) {
+      if (onOpenSheetsManager) {
+        onOpenSheetsManager();
+      }
       return;
     }
 
-    // If only target sheet is configured:
-    if (hasValidTargetSheet) {
-      executeSync('target');
-      return;
-    }
-
-    // Default to Google master sheet (will trigger 1-time link if needed)
-    executeSync('master');
+    executeSync();
   };
 
   return (
@@ -214,11 +216,31 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
           </p>
         </div>
 
-        {/* Totals */}
-        <div className="flex items-center gap-3">
-          <div className="bg-slate-50 border border-slate-200 p-2 px-4 rounded-xl text-xs">
-            <span className="text-slate-500 font-medium">Total Amount: </span>
-            <span className="font-mono font-bold text-slate-900 ml-1">${totalAmount.toFixed(2)}</span>
+        {/* Totals Breakdown */}
+        <div className="flex flex-wrap items-center gap-2">
+          {totalCredits > 0 && (
+            <>
+              <div className="bg-slate-50 border border-slate-200 py-1.5 px-3 rounded-xl text-xs">
+                <span className="text-slate-500 font-medium">Charges: </span>
+                <span className="font-mono font-bold text-slate-800 ml-1">
+                  ${totalCharges.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+              <div className="bg-emerald-50 border border-emerald-200/60 py-1.5 px-3 rounded-xl text-xs text-emerald-800">
+                <span className="text-emerald-700 font-medium">Credits/Payments: </span>
+                <span className="font-mono font-bold ml-1">
+                  -${totalCredits.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+            </>
+          )}
+          <div className="bg-slate-900 border border-slate-900 py-1.5 px-3.5 rounded-xl text-xs text-white shadow-2xs">
+            <span className="text-slate-300 font-medium">
+              {totalCredits > 0 ? 'Net Total: ' : 'Total Amount: '}
+            </span>
+            <span className="font-mono font-bold text-emerald-400 ml-1">
+              ${netTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </span>
           </div>
         </div>
       </div>
@@ -266,6 +288,18 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
             )}
           </button>
 
+          {/* Session History */}
+          {onOpenHistory && (
+            <button
+              onClick={onOpenHistory}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 rounded-lg border border-slate-300 text-xs font-semibold shadow-2xs transition-all cursor-pointer"
+              title="View & restore past import sessions"
+            >
+              <Clock className="h-3.5 w-3.5 text-blue-600" />
+              <span>History</span>
+            </button>
+          )}
+
           {/* Attach / Configure Target Google Sheet */}
           {onOpenSheetsManager && (
             <button
@@ -282,15 +316,51 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
             </button>
           )}
 
+          {/* Mode Selector: Replace (Clean Sheet) vs Append */}
+          <div className="flex items-center rounded-lg border border-slate-300 bg-white p-0.5 text-[11px] shadow-2xs">
+            <button
+              type="button"
+              onClick={() => setSyncMode('overwrite')}
+              className={`px-2 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                syncMode === 'overwrite'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+              title="Clears old sheet data & displaced columns, writing fresh rows cleanly"
+            >
+              Replace
+            </button>
+            <button
+              type="button"
+              onClick={() => setSyncMode('append')}
+              className={`px-2 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                syncMode === 'append'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+              title="Appends new rows to bottom of existing data"
+            >
+              Append
+            </button>
+          </div>
+
           {/* 1-Click Sync to Google Sheets via Google OAuth */}
           <button
             onClick={handleInitiateSync}
             disabled={filtered.length === 0 || syncStatus.loading}
             className="flex items-center gap-2 px-4 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-lg text-xs font-bold shadow-xs transition-all disabled:opacity-50 cursor-pointer"
-            title="Export directly to Google Sheets (Target Sheet or Master Sheet)"
+            title={
+              syncMode === 'overwrite'
+                ? 'Wipe existing sheet and write fresh rows'
+                : 'Append rows to bottom of sheet'
+            }
           >
             <Send className="h-3.5 w-3.5" />
-            {syncStatus.loading ? 'Syncing...' : 'Sync to Google Sheets'}
+            {syncStatus.loading
+              ? 'Syncing...'
+              : syncMode === 'overwrite'
+              ? 'Sync & Replace Sheet'
+              : 'Sync (Append Rows)'}
           </button>
 
           {/* Export CSV */}
@@ -543,111 +613,6 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
         </div>
       )}
 
-      {/* Destination Choice Modal (When both Target Sheet & Google Account Linking are active) */}
-      {showDestinationModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-md">
-          <div className="w-full max-w-lg bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
-            {/* Header */}
-            <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/80">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-2xl bg-emerald-100 flex items-center justify-center text-emerald-600 shadow-2xs">
-                  <Layers className="h-5 w-5" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900 tracking-tight">Choose Sync Destination</h3>
-                  <p className="text-xs text-slate-500">Select which Google Sheet to export these {filtered.length} rows to</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowDestinationModal(false)}
-                className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200/50 rounded-xl transition-all cursor-pointer"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            {/* Options */}
-            <div className="p-6 space-y-4">
-              <p className="text-xs text-slate-600">
-                You have both an attached <strong>Target Sheet</strong> and a <strong>Linked Google Account</strong> configured. Where would you like to sync?
-              </p>
-
-              {/* Option 1: Target Sheet */}
-              <div
-                onClick={() => executeSync('target')}
-                className="p-4 bg-slate-50 hover:bg-emerald-50/70 border border-slate-200 hover:border-emerald-300 rounded-2xl transition-all cursor-pointer group shadow-2xs space-y-2"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-900 group-hover:text-emerald-900">
-                      Target Sheet (Attached URL)
-                    </span>
-                    <span className="text-[10px] font-semibold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">
-                      Custom Tab
-                    </span>
-                  </div>
-                  <div className="h-7 w-7 rounded-xl bg-white border border-slate-200 group-hover:border-emerald-300 flex items-center justify-center text-slate-400 group-hover:text-emerald-600 shadow-2xs">
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </div>
-                </div>
-
-                <p className="text-xs text-slate-600 font-mono truncate bg-white p-2 rounded-lg border border-slate-200/70">
-                  {targetSheet?.url || targetSheet?.spreadsheetId}
-                </p>
-
-                <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
-                  <span>Destination Tab: <strong className="text-slate-700">{targetSheet?.tabName || 'Sheet1'}</strong></span>
-                  <span className="text-emerald-600 font-bold group-hover:underline">Export to this sheet &rarr;</span>
-                </div>
-              </div>
-
-              {/* Option 2: Google Linked Master Sheet */}
-              <div
-                onClick={() => executeSync('master')}
-                className="p-4 bg-slate-50 hover:bg-blue-50/70 border border-slate-200 hover:border-blue-300 rounded-2xl transition-all cursor-pointer group shadow-2xs space-y-2"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-900 group-hover:text-blue-900">
-                      Google Master Sheet
-                    </span>
-                    <span className="text-[10px] font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
-                      Primary Drive
-                    </span>
-                  </div>
-                  <div className="h-7 w-7 rounded-xl bg-white border border-slate-200 group-hover:border-blue-300 flex items-center justify-center text-slate-400 group-hover:text-blue-600 shadow-2xs">
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </div>
-                </div>
-
-                <div className="bg-white p-2 rounded-lg border border-slate-200/70 space-y-0.5">
-                  <p className="text-xs font-bold text-slate-800">
-                    Bank Statement Imports (Master)
-                  </p>
-                  <p className="text-[11px] text-slate-500 font-mono truncate">
-                    Account: {connectedAccount?.email || 'Linked Google Account'}
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
-                  <span>Destination Tab: <strong className="text-slate-700">Transactions</strong></span>
-                  <span className="text-blue-600 font-bold group-hover:underline">Export to master &rarr;</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Footer */}
-            <div className="px-6 py-3.5 bg-slate-50/80 border-t border-slate-100 flex justify-end">
-              <button
-                onClick={() => setShowDestinationModal(false)}
-                className="px-4 py-1.5 text-xs text-slate-600 hover:text-slate-800 font-medium rounded-xl hover:bg-slate-200/50 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

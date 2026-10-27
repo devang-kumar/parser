@@ -1,4 +1,4 @@
-import type { User, UserRole, ActivityLog, AuthResponse } from '../types';
+import type { User, UserRole, ActivityLog, AuthResponse, SavedSpreadsheet } from '../types';
 
 class AuthService {
   private SESSION_KEY = 'statement_importer_session_v3';
@@ -142,6 +142,47 @@ class AuthService {
       return await res.json();
     } catch (error: any) {
       return { success: false, message: 'Network error' };
+    }
+  }
+
+  // User Saved Sheets
+  async getUserSheets(): Promise<SavedSpreadsheet[]> {
+    try {
+      const res = await fetch('/api/auth/sheets', { headers: this.getHeaders() });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.sheets)) {
+        return data.sheets;
+      }
+    } catch (e) {
+      console.warn('Failed to fetch user sheets from server', e);
+    }
+    return [];
+  }
+
+  async saveUserSheets(sheets: SavedSpreadsheet[]): Promise<boolean> {
+    try {
+      const res = await fetch('/api/auth/sheets', {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ sheets }),
+      });
+      const data = await res.json();
+      return !!data.success;
+    } catch {
+      return false;
+    }
+  }
+
+  async deleteUserSheet(id: string): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/auth/sheets/${id}`, {
+        method: 'DELETE',
+        headers: this.getHeaders(),
+      });
+      const data = await res.json();
+      return !!data.success;
+    } catch {
+      return false;
     }
   }
 

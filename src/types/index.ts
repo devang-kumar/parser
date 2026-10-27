@@ -51,11 +51,27 @@ export interface StatementFile {
   fileObject?: File;
 }
 
-export interface UploadHistoryItem {
-  id: string;
-  userId: string;
-  fileName: string;
-  uploadDate: string;
+export interface SessionFileSummary {
+  name: string;
+  size?: number;
   transactionCount: number;
-  transactions: TransactionRow[];
 }
+
+export interface ImportSession {
+  id: string;
+  userId?: string;
+  name: string;
+  fileName?: string;
+  uploadDate: string;
+  createdAt?: string;
+  fileCount: number;
+  files: SessionFileSummary[];
+  transactionCount: number;
+  totalAmount?: number;
+  transactions: TransactionRow[];
+  sheetUrl?: string;
+}
+
+export type UploadHistoryItem = ImportSession;
+
+

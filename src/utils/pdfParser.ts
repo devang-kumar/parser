@@ -21,8 +21,11 @@ interface SpatialLine {
 
 import { createWorker } from 'tesseract.js';
 
+import { openRouterService } from '../services/openRouterService';
+
 /**
  * Main parser function supporting PDF, CSV, Text, and Image files
+ * Uses OpenRouter AI Vision & Language models as primary parsing engine
  */
 export async function parseStatementFile(
   file: File,
@@ -30,17 +33,52 @@ export async function parseStatementFile(
   group: GroupType
 ): Promise<TransactionRow[]> {
   const extension = file.name.split('.').pop()?.toLowerCase() || '';
+  const supported = ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff', 'csv', 'txt'];
 
-  if (extension === 'pdf') {
-    return await parsePDFStatement(file, fileId, group);
-  } else if (extension === 'csv' || extension === 'txt') {
-    return await parseCSVStatement(file, fileId, group);
-  } else if (['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff', 'gif'].includes(extension)) {
-    return await parseImageStatement(file, fileId, group);
-  } else {
+  if (!supported.includes(extension)) {
     throw new Error(`Unsupported file type: .${extension}. Please upload a PDF, image (PNG/JPG), or CSV statement.`);
   }
+
+  // Primary: If OpenRouter API key is configured, use AI Vision & Multimodal Parser
+  if (openRouterService.hasApiKey()) {
+    try {
+      const rows = await openRouterService.parseStatementWithAI(file, fileId, group);
+      if (rows && rows.length > 0) {
+        return rows;
+      }
+    } catch (aiErr: any) {
+      console.warn('AI Parsing error, attempting fallback if available:', aiErr.message || aiErr);
+      
+      // Fallback for CSV
+      if (extension === 'csv' || extension === 'txt') {
+        return await parseCSVStatement(file, fileId, group);
+      }
+      // Fallback for PDF: use local spatial parser
+      if (extension === 'pdf') {
+        console.info('Falling back to local spatial PDF parser...');
+        return await parsePDFStatement(file, fileId, group);
+      }
+      // Fallback for image: use local OCR
+      if (['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff'].includes(extension)) {
+        return await parseImageStatement(file, fileId, group);
+      }
+      throw aiErr;
+    }
+  }
+
+  // Fallback for image when no AI key
+  if (['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff'].includes(extension)) {
+    return await parseImageStatement(file, fileId, group);
+  }
+
+  // Fallback for CSV
+  if (extension === 'csv' || extension === 'txt') {
+    return await parseCSVStatement(file, fileId, group);
+  }
+
+  return await parsePDFStatement(file, fileId, group);
 }
+
 
 /**
  * Detects whether statement is a Bank Account (Checking/Savings) or Credit Card
@@ -56,9 +94,9 @@ function detectAccountType(text: string): 'BANK' | 'CREDIT_CARD' {
 }
 
 /**
- * Parses image statements using Tesseract OCR
+ * Parses image statements using Tesseract OCR (local fallback)
  */
-async function parseImageStatement(
+export async function parseImageStatement(
   file: File,
   fileId: string,
   group: GroupType
