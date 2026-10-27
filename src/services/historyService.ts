@@ -78,7 +78,7 @@ class HistoryService {
         if (txA && txB) {
           if (
             txA.date === txB.date &&
-            txA.description === txB.description &&
+            ((txA as any).description || txA.chargeInformation) === ((txB as any).description || txB.chargeInformation) &&
             Math.abs((txA.pricePaid || 0) - (txB.pricePaid || 0)) < 0.01
           ) {
             return true;

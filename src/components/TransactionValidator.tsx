@@ -13,8 +13,7 @@ import {
   Trash2,
   Layers,
   Sparkles,
-  ArrowRight,
-  X,
+  Clock,
 } from 'lucide-react';
 import type { TransactionRow, SavedSpreadsheet } from '../types';
 import {
@@ -85,7 +84,6 @@ export const TransactionValidator: React.FC<TransactionValidatorProps> = ({
   );
 
   const netTotal = totalCharges - totalCredits;
-  const totalAmount = netTotal;
 
   const startEdit = (row: TransactionRow) => {
     setEditingId(row.id);
